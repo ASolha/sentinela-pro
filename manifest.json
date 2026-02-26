@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "Sentinela Pro",
+  "version": "1.0",
+  "description": "Monitoramento ML + Mensagens Rápidas (Passo Largo) + Captura de Dados (Clip)",
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "notifications",
+    "tabs",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "https://southamerica-east1-fefrello.cloudfunctions.net/*",
+    "https://raw.githubusercontent.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Sentinela Pro - Clip",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "alerta.wav",
+        "fonts/aniron.ttf",
+        "icon128.png",
+        "icon48.png",
+        "icon16.png"
+      ],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
