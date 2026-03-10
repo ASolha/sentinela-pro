@@ -7,6 +7,876 @@
 // BARRA SUPERIOR CENTRALIZADA
 // ══════════════════════════════════════════════════════════════
 
+const PEGADOR_STORAGE_KEY = 'pegadorLastQuantity';
+const HUB_SESSION_KEY = 'sp_hub_session';
+const HUB_BUTTON_ORDER_KEY = 'sp_hub_button_order';
+const HUB_DEFAULT_BUTTON_ORDER = ['passo', 'clip', 'counter', 'orders', 'gestor'];
+const CFG = {
+  supabaseUrl: 'https://dqiosohjicnruwrhxeou.supabase.co',
+  supabaseKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRxaW9zb2hqaWNucnV3cmh4ZW91Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI0OTI0NzcsImV4cCI6MjA4ODA2ODQ3N30.y5LVH3Lb9xDuHLDVvDaNCrzuS2RsJenI0EqgVtHBWfM'
+};
+
+let auth = { user: null, token: null, refreshToken: null };
+let gestorPendencias = [];
+let gestorLoading = false;
+let gestorCapturedData = null;
+let gestorLastCaptureUrl = '';
+let gestorCurrentTab = 'pendencias';
+let gestorHistoryFilter = '';
+let gestorEmailSettings = { emailTo: '', emailCC: '' };
+let gestorEmailSentIds = new Set();
+let gestorCopiedIds = new Set();
+let gestorArchivedIds = new Set();
+let gestorFefrelloSentIds = new Set();
+let gestorExpandedCardId = null;
+let gestorPanelSavedPos = null;
+let gestorPanelPositionLoaded = false;
+
+const GESTOR_IGNORE_MODEL_TERMS = [
+  /pend[êe]ncia/i,
+  /gestor/i,
+  /observa[cç][õo]es/i,
+  /nova pend[êe]ncia/i
+];
+const GESTOR_EMAIL_SETTINGS_KEY = 'sp_gestor_email_settings';
+const GESTOR_CARD_STATUS_KEY = 'sp_gestor_card_status';
+const GESTOR_FEFRELLO_CONFIG_KEY = 'sp_gestor_fefrello_config';
+const GESTOR_FEFRELLO_CACHE_KEY = 'sp_gestor_fefrello_cache';
+const GESTOR_PANEL_POSITION_KEY = 'sp_gestor_panel_pos';
+const DEFAULT_GESTOR_EMAIL_TO = 'brunosims@gmail.com';
+const GESTOR_FEFRELLO_API_BASE = 'https://southamerica-east1-fefrello.cloudfunctions.net';
+const GESTOR_FEFRELLO_API_KEY = '708a34771f2659594502ed4b74cd634819a297d37e3fb2fa3cafdf826c286f16';
+const GESTOR_FEFRELLO_CACHE_TTL = 24 * 60 * 60 * 1000;
+const GESTOR_FEFRELLO_RESPONSAVEIS = ['Solha', 'Ti', 'Vitao', 'Brunao', 'Fe'];
+
+function hasAuthSession() {
+  return Boolean(auth.user && auth.token);
+}
+
+function saveSession(session) {
+  return new Promise((resolve) => chrome.storage.local.set({ [HUB_SESSION_KEY]: session }, resolve));
+}
+
+function getSession() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(HUB_SESSION_KEY, (data) => resolve(data?.[HUB_SESSION_KEY] || null));
+  });
+}
+
+function clearSession() {
+  return new Promise((resolve) => chrome.storage.local.remove(HUB_SESSION_KEY, resolve));
+}
+
+async function signIn(email, password) {
+  const res = await fetch(`${CFG.supabaseUrl}/auth/v1/token?grant_type=password`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: CFG.supabaseKey
+    },
+    body: JSON.stringify({ email, password })
+  });
+
+  const data = await res.json();
+  if (!res.ok) {
+    throw new Error(data.error_description || data.msg || 'Falha no login.');
+  }
+
+  return data;
+}
+
+async function signOut() {
+  if (!auth.token) return;
+
+  await fetch(`${CFG.supabaseUrl}/auth/v1/logout`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: CFG.supabaseKey,
+      Authorization: `Bearer ${auth.token}`
+    }
+  }).catch(() => {});
+}
+
+async function refreshSession() {
+  if (!auth.refreshToken) {
+    throw new Error('Sem refresh token.');
+  }
+
+  const res = await fetch(`${CFG.supabaseUrl}/auth/v1/token?grant_type=refresh_token`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      apikey: CFG.supabaseKey
+    },
+    body: JSON.stringify({ refresh_token: auth.refreshToken })
+  });
+
+  if (!res.ok) {
+    throw new Error('Sessão expirada. Faça login novamente.');
+  }
+
+  const data = await res.json();
+  auth.token = data.access_token;
+  auth.refreshToken = data.refresh_token;
+  await saveSession({
+    access_token: data.access_token,
+    refresh_token: data.refresh_token,
+    user: auth.user
+  });
+
+  return data;
+}
+
+async function sbFetch(path, opts = {}) {
+  const headers = {
+    'Content-Type': 'application/json',
+    apikey: CFG.supabaseKey,
+    Authorization: `Bearer ${auth.token || CFG.supabaseKey}`,
+    ...opts.headers
+  };
+
+  const res = await fetch(`${CFG.supabaseUrl}${path}`, { ...opts, headers });
+
+  if (res.status === 401 && auth.refreshToken) {
+    await refreshSession();
+    headers.Authorization = `Bearer ${auth.token}`;
+    const retry = await fetch(`${CFG.supabaseUrl}${path}`, { ...opts, headers });
+    if (!retry.ok) {
+      throw new Error(`HTTP ${retry.status}`);
+    }
+    return retry.status === 204 ? null : retry.json().catch(() => null);
+  }
+
+  if (!res.ok) {
+    let message = `HTTP ${res.status}`;
+    try {
+      const payload = await res.json();
+      message = payload.error_description || payload.message || payload.msg || message;
+    } catch (_) {}
+    if (typeof message === 'string' && (
+      message.includes('passo_largo_user_data') ||
+      message.includes('Could not find the table') ||
+      message.includes('relation') ||
+      message.includes('does not exist')
+    )) {
+      message = 'A tabela passo_largo_user_data ainda não existe no Supabase. Rode o SQL de criação primeiro.';
+    }
+    throw new Error(message);
+  }
+
+  return res.status === 204 ? null : res.json().catch(() => null);
+}
+
+function notifyAuthChanged() {
+  syncAuthButton();
+  document.dispatchEvent(new CustomEvent('sp:auth-changed', { detail: { user: auth.user } }));
+}
+
+async function restoreAuthSession() {
+  const session = await getSession();
+  if (!session?.access_token || !session?.user) {
+    auth = { user: null, token: null, refreshToken: null };
+    notifyAuthChanged();
+    return false;
+  }
+
+  auth = {
+    user: session.user,
+    token: session.access_token,
+    refreshToken: session.refresh_token || null
+  };
+  notifyAuthChanged();
+  return true;
+}
+
+function formatGestorDate(dateString) {
+  if (!dateString) return '';
+  try {
+    return new Date(dateString).toLocaleString('pt-BR', {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  } catch (_) {
+    return '';
+  }
+}
+
+function escapeGestorValue(value) {
+  return escapeHtml(String(value || ''));
+}
+
+function getGestorPageText() {
+  return document.body?.innerText || '';
+}
+
+function captureGestorPageData() {
+  const url = window.location.href;
+  const pageText = getGestorPageText();
+  const pageLines = pageText.split('\n');
+
+  let loginCliente = '';
+  const loginNode = document.querySelector('div.sc-title-subtitle-action__container p.sc-text');
+  if (loginNode) {
+    const text = loginNode.textContent || loginNode.innerText || '';
+    const match = text.match(/^([^|]+?)\s*\|\s*CPF/);
+    loginCliente = match ? match[1].trim() : text.trim();
+  }
+  if (!loginCliente) {
+    const match = pageText.match(/([^\s|]+(?:\s+[^\s|]+)*)\s*\|\s*CPF\s*\d+/);
+    loginCliente = match ? match[1].trim() : '';
+  }
+
+  let numeroVenda = '';
+  const vendaMatch = pageText.match(/Venda\s*#\s*(\d+)/i);
+  if (vendaMatch) {
+    numeroVenda = vendaMatch[1];
+  } else {
+    const orderNode = document.querySelector('[data-testid="order-number"], .order-number, [class*="order-id"]');
+    if (orderNode?.textContent) {
+      numeroVenda = orderNode.textContent.replace(/[^0-9]/g, '');
+    } else {
+      const urlMatch = url.match(/[#?/](\d{8,})/);
+      if (urlMatch) numeroVenda = urlMatch[1];
+    }
+  }
+
+  let modelo = '';
+  const modeloPatterns = [
+    /\*\*(\d+mm[^*\n]+)/,
+    /(\d+mm\s+[^\n]+)/,
+    /\*\*([^*]*\d+mm[^*\n]+)/,
+    /Modelo:\s*([^\n]+)/i
+  ];
+  for (const pattern of modeloPatterns) {
+    const match = pageText.match(pattern);
+    if (!match) continue;
+    let candidate = match[1].replace(/\*\*/g, '').trim();
+    candidate = candidate.replace(/\s+(Banhad[ao]|Folhead[ao]).*$/i, '').trim();
+    if (!candidate || GESTOR_IGNORE_MODEL_TERMS.some((rule) => rule.test(candidate))) continue;
+    modelo = candidate;
+    break;
+  }
+
+  const aroCaptures = [];
+  const aroMatches = pageText.match(/Aro\s*-\s*([^\n|]+)/g);
+  if (aroMatches?.length) {
+    aroMatches.forEach((match, index) => {
+      const text = match.replace(/Aro\s*-\s*/i, '').trim();
+      const numberMatch = text.match(/(\d+(?:[.,]\d+)?)/);
+      const numero = numberMatch ? numberMatch[1] : '';
+      let comPedra = '';
+      if (/com\s+pedra/i.test(text)) {
+        comPedra = ' com pedra';
+      } else {
+        for (let i = 0; i < pageLines.length; i += 1) {
+          if (!pageLines[i].includes(match)) continue;
+          for (let j = Math.max(0, i - 3); j <= Math.min(pageLines.length - 1, i + 3); j += 1) {
+            if (/com\s+pedra/i.test(pageLines[j])) {
+              comPedra = ' com pedra';
+              break;
+            }
+          }
+          break;
+        }
+      }
+
+      let modeloAro = '';
+      for (let i = 0; i < pageLines.length; i += 1) {
+        if (!pageLines[i].includes(match)) continue;
+        for (let j = Math.max(0, i - 3); j <= Math.min(pageLines.length - 1, i + 3); j += 1) {
+          const candidateLine = pageLines[j];
+          for (const pattern of modeloPatterns) {
+            const modelMatch = candidateLine.match(pattern);
+            if (!modelMatch) continue;
+            let candidate = modelMatch[1].replace(/\*\*/g, '').trim();
+            candidate = candidate.replace(/\s+(Banhad[ao]|Folhead[ao]).*$/i, '').trim();
+            if (!candidate || GESTOR_IGNORE_MODEL_TERMS.some((rule) => rule.test(candidate))) continue;
+            modeloAro = candidate;
+            break;
+          }
+          if (modeloAro) break;
+        }
+        break;
+      }
+
+      aroCaptures.push({
+        label: `Avulso ${index + 1}`,
+        value: (numero + comPedra).trim(),
+        model: modeloAro || modelo
+      });
+    });
+  } else {
+    const masculinoMatch = pageText.match(/Masculino\s*[-\u2013]\s*([^\n|]+)/);
+    let aroMasculino = '';
+    if (masculinoMatch) {
+      const text = masculinoMatch[1].trim();
+      const numberMatch = text.match(/(\d+(?:[.,]\d+)?)/);
+      const numero = numberMatch ? numberMatch[1] : text;
+      aroMasculino = (numero + (/com\s+pedra/i.test(text) ? ' com pedra' : '')).trim();
+    }
+
+    const femininoMatch = pageText.match(/Feminino\s*[-\u2013]\s*([^\n|]+)/);
+    let aroFeminino = '';
+    if (femininoMatch) {
+      const text = femininoMatch[1].trim();
+      const numberMatch = text.match(/(\d+(?:[.,]\d+)?)/);
+      const numero = numberMatch ? numberMatch[1] : text;
+      aroFeminino = (numero + (/com\s+pedra/i.test(text) ? ' com pedra' : '')).trim();
+    }
+
+    if (aroMasculino || aroFeminino) {
+      aroCaptures.push({ label: 'Masculino', value: aroMasculino, model: modelo, type: 'Masculino' });
+      aroCaptures.push({ label: 'Feminino', value: aroFeminino, model: modelo, type: 'Feminino' });
+    }
+  }
+
+  return {
+    login_cliente: loginCliente,
+    numero_venda: numeroVenda,
+    modelo,
+    url,
+    aro: buildGestorAroValue(aroCaptures)
+  };
+}
+
+function getGestorCapturedPageData(force = false) {
+  if (!force && gestorCapturedData && gestorLastCaptureUrl === window.location.href) {
+    return gestorCapturedData;
+  }
+
+  gestorCapturedData = captureGestorPageData();
+  gestorLastCaptureUrl = window.location.href;
+  return gestorCapturedData;
+}
+
+function fillGestorForm(panel, force = false) {
+  if (!panel) return false;
+  const data = getGestorCapturedPageData(force);
+  if (!data) return false;
+
+  const loginInput = panel.querySelector('#sp-gestor-login');
+  const vendaInput = panel.querySelector('#sp-gestor-venda');
+  const modeloInput = panel.querySelector('#sp-gestor-modelo');
+  const urlInput = panel.querySelector('#sp-gestor-url');
+  const obsInput = panel.querySelector('#sp-gestor-obs');
+  const aroContainer = panel.querySelector('#sp-gestor-aro-fields');
+
+  if (loginInput && (force || !loginInput.value.trim())) loginInput.value = data.login_cliente || '';
+  if (vendaInput && (force || !vendaInput.value.trim())) vendaInput.value = data.numero_venda || '';
+  if (modeloInput && (force || !modeloInput.value.trim())) modeloInput.value = data.modelo || '';
+  if (urlInput && (force || !urlInput.value.trim())) urlInput.value = data.url || window.location.href;
+  if (aroContainer) {
+    const currentFields = Array.from(aroContainer.querySelectorAll('[data-gestor-aro-label]'));
+    const hasFilledAro = currentFields.some((field) => String(field.value || '').trim());
+    if (force || currentFields.length === 0 || !hasFilledAro) {
+      aroContainer.innerHTML = renderGestorAroFields(parseGestorAros(data.aro), 'form');
+    }
+  }
+  if (obsInput && force && !obsInput.value.trim()) {
+    obsInput.value = '';
+  }
+
+  return Boolean(data.login_cliente || data.numero_venda || data.modelo || parseGestorAros(data.aro).length);
+}
+
+function hasGestorDuplicateVenda(numeroVenda, excludeId = null) {
+  const target = String(numeroVenda || '').trim();
+  if (!target) return false;
+  return gestorPendencias.some((item) =>
+    String(item.numero_venda || '').trim() === target &&
+    (excludeId == null || String(item.id) !== String(excludeId))
+  );
+}
+
+function getGestorScopedUserId() {
+  return auth.user?.id || '';
+}
+
+function getGestorPendenciaById(id) {
+  return gestorPendencias.find((item) => String(item.id) === String(id)) || null;
+}
+
+function getGestorVisiblePendencias(tab = gestorCurrentTab) {
+  const items = tab === 'historico'
+    ? gestorPendencias.filter((item) => gestorArchivedIds.has(String(item.id)))
+    : gestorPendencias.filter((item) => !gestorArchivedIds.has(String(item.id)));
+
+  const filter = String(gestorHistoryFilter || '').trim().toLowerCase();
+  if (tab !== 'historico' || !filter) return items;
+
+  return items.filter((item) => {
+    const haystack = [
+      item.login_cliente,
+      item.numero_venda,
+      item.modelo,
+      item.aro,
+      item.observacoes,
+      item.url
+    ].join(' ').toLowerCase();
+    return haystack.includes(filter);
+  });
+}
+
+function getGestorActiveCount() {
+  return getGestorVisiblePendencias('pendencias').length;
+}
+
+function getGestorArchivedCount() {
+  return gestorPendencias.filter((item) => gestorArchivedIds.has(String(item.id))).length;
+}
+
+function normalizeGestorEmailSettings(settings) {
+  return {
+    emailTo: (settings?.emailTo || DEFAULT_GESTOR_EMAIL_TO).trim(),
+    emailCC: (settings?.emailCC || '').trim()
+  };
+}
+
+function buildGestorSingleEmailHtml(pendencia, date = new Date().toLocaleDateString('pt-BR')) {
+  return `
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
+      <h2 style="color:#222;border-bottom:3px solid #FFE600;padding-bottom:8px;">
+        Pendência - ${escapeGestorValue(pendencia.login_cliente) || 'Cliente'}
+      </h2>
+      <p style="color:#666;margin-bottom:16px;">Data: <strong>${date}</strong></p>
+      ${gestorCardToRichHtml(pendencia)}
+    </div>`;
+}
+
+function buildGestorConsolidatedEmailHtml(items, date = new Date().toLocaleDateString('pt-BR')) {
+  return `
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
+      <h2 style="color:#222;border-bottom:3px solid #FFE600;padding-bottom:8px;">
+        Pendências em Aberto - ${date}
+      </h2>
+      <p style="color:#666;margin-bottom:16px;">Total: <strong>${items.length}</strong> pendência(s)</p>
+      ${items.map((item, index) =>
+        `${index > 0 ? '<hr style="border:none;border-top:1px solid #eee;margin:12px 0;" />' : ''}${gestorCardToRichHtml(item)}`
+      ).join('')}
+    </div>`;
+}
+
+function gestorHtmlToPlainText(html) {
+  const container = document.createElement('div');
+  container.innerHTML = html;
+  return (container.innerText || container.textContent || '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+async function copyGestorHtml(html) {
+  const plain = gestorHtmlToPlainText(html);
+  try {
+    if (window.ClipboardItem && navigator.clipboard?.write) {
+      await navigator.clipboard.write([
+        new ClipboardItem({
+          'text/html': new Blob([html], { type: 'text/html' }),
+          'text/plain': new Blob([plain], { type: 'text/plain' })
+        })
+      ]);
+      return;
+    }
+
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(plain);
+      return;
+    }
+  } catch (_) {}
+
+  const textarea = document.createElement('textarea');
+  textarea.value = plain;
+  textarea.style.cssText = 'position:fixed;left:-9999px;top:-9999px;opacity:0';
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  textarea.remove();
+}
+
+function parseGestorAros(aroStr) {
+  if (!aroStr) return [];
+  try {
+    const parsed = JSON.parse(aroStr);
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((item, index) => ({
+          label: String(item?.label || item?.tipo || `Aro ${index + 1}`),
+          value: String(item?.value ?? item?.numero ?? '').trim(),
+          model: String(item?.model ?? item?.modelo ?? '').trim(),
+          type: String(item?.type ?? item?.tipo ?? '').trim()
+        }))
+        .filter((item) => item.label || item.value || item.model);
+    }
+  } catch (_) {}
+  return [{ label: 'Aro 1', value: String(aroStr).trim() }];
+}
+
+function buildGestorAroValue(entries) {
+  const sanitized = entries
+    .map((entry, index) => ({
+      label: String(entry?.label || `Aro ${index + 1}`),
+      value: String(entry?.value || '').trim(),
+      model: String(entry?.model || '').trim(),
+      type: String(entry?.type || '').trim()
+    }))
+    .filter((entry) => entry.label || entry.value || entry.model);
+  return sanitized.length ? JSON.stringify(sanitized) : '';
+}
+
+function renderGestorAroFields(entries, scope = 'form') {
+  const items = entries.length ? entries : [{ label: 'Aro 1', value: '' }];
+  return items.map((entry, index) => `
+    <label class="sp-gestor-edit-field sp-gestor-aro-field">
+      <span>${escapeGestorValue(entry.label || `Aro ${index + 1}`)}</span>
+      ${entry.model || /^Avulso\s+\d+/i.test(entry.label || '') ? `
+        <input
+          type="text"
+          data-gestor-aro-model="${escapeGestorValue(entry.label || `Aro ${index + 1}`)}"
+          data-gestor-aro-scope="${scope}"
+          value="${escapeGestorValue(entry.model || '')}"
+          placeholder="Modelo do avulso"
+        />
+      ` : ''}
+      <input
+        type="text"
+        data-gestor-aro-label="${escapeGestorValue(entry.label || `Aro ${index + 1}`)}"
+        data-gestor-aro-type="${escapeGestorValue(entry.type || '')}"
+        data-gestor-aro-scope="${scope}"
+        value="${escapeGestorValue(entry.value || '')}"
+        placeholder="Informe o aro"
+      />
+    </label>
+  `).join('');
+}
+
+function collectGestorArosFromScope(scope) {
+  return Array.from(scope.querySelectorAll('[data-gestor-aro-label]')).map((field, index) => ({
+    label: field.dataset.gestorAroLabel || `Aro ${index + 1}`,
+    value: field.value || '',
+    model: field.closest('.sp-gestor-aro-field')?.querySelector('[data-gestor-aro-model]')?.value || '',
+    type: field.dataset.gestorAroType || ''
+  }));
+}
+
+async function fefrelloFetch(endpoint, options = {}) {
+  const response = await fetch(`${GESTOR_FEFRELLO_API_BASE}${endpoint}`, {
+    ...options,
+    headers: {
+      'x-api-key': GESTOR_FEFRELLO_API_KEY,
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    }
+  });
+  const json = await response.json();
+  if (!response.ok) throw new Error(json.error || 'Erro na API Fefrello');
+  return json;
+}
+
+function saveGestorFefrelloCache(data) {
+  return new Promise((resolve) => chrome.storage.local.set({
+    [GESTOR_FEFRELLO_CACHE_KEY]: { ...data, timestamp: Date.now() }
+  }, resolve));
+}
+
+function loadGestorFefrelloCache() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([GESTOR_FEFRELLO_CACHE_KEY], (result) => {
+      const cache = result?.[GESTOR_FEFRELLO_CACHE_KEY];
+      resolve(cache && (Date.now() - cache.timestamp) < GESTOR_FEFRELLO_CACHE_TTL ? cache : null);
+    });
+  });
+}
+
+async function loadGestorFefrelloBoards(forceRefresh = false) {
+  if (!forceRefresh) {
+    const cache = await loadGestorFefrelloCache();
+    if (cache?.boards) return cache.boards;
+  }
+  const response = await fefrelloFetch('/listBoards');
+  const boards = response.data || [];
+  const current = (await loadGestorFefrelloCache()) || {};
+  await saveGestorFefrelloCache({ ...current, boards });
+  return boards;
+}
+
+async function loadGestorFefrelloColumns(boardId, forceRefresh = false) {
+  if (!forceRefresh) {
+    const cache = await loadGestorFefrelloCache();
+    if (cache?.columns?.[boardId]) return cache.columns[boardId];
+  }
+  const response = await fefrelloFetch(`/listColumns?boardId=${boardId}`);
+  const columns = response.data || [];
+  const current = (await loadGestorFefrelloCache()) || {};
+  const byBoard = current.columns || {};
+  byBoard[boardId] = columns;
+  await saveGestorFefrelloCache({ ...current, columns: byBoard });
+  return columns;
+}
+
+function saveGestorFefrelloConfig(config) {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([GESTOR_FEFRELLO_CONFIG_KEY], (result) => {
+      const scoped = result?.[GESTOR_FEFRELLO_CONFIG_KEY] || {};
+      const userId = getGestorScopedUserId();
+      if (!userId) {
+        resolve();
+        return;
+      }
+      scoped[userId] = config;
+      chrome.storage.local.set({ [GESTOR_FEFRELLO_CONFIG_KEY]: scoped }, resolve);
+    });
+  });
+}
+
+function loadGestorFefrelloConfig() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([GESTOR_FEFRELLO_CONFIG_KEY], (result) => {
+      const scoped = result?.[GESTOR_FEFRELLO_CONFIG_KEY] || {};
+      resolve(scoped[getGestorScopedUserId()] || null);
+    });
+  });
+}
+
+async function createGestorFefrelloCard(boardId, columnId, title, description, responsible) {
+  const body = { boardId, columnId, title };
+  if (description) body.description = description;
+  if (responsible) body.responsible = responsible;
+  return fefrelloFetch('/createCardEndpoint', { method: 'POST', body: JSON.stringify(body) });
+}
+
+function formatGestorCardForFefrello(pendencia) {
+  const lines = [];
+  if (pendencia.url) lines.push(pendencia.url);
+  if (pendencia.modelo) lines.push(`Modelo: ${pendencia.modelo}`);
+  parseGestorAros(pendencia.aro).forEach((aro) => {
+    if (aro.model && /^Avulso\s+\d+/i.test(aro.label || '')) lines.push(`Modelo ${aro.label}: ${aro.model}`);
+    if (aro.value) lines.push(`${aro.label}: ${aro.value}`);
+  });
+  if (pendencia.numero_venda) lines.push(`Venda #${pendencia.numero_venda}`);
+  if (pendencia.observacoes) lines.push(`\n${pendencia.observacoes}`);
+  return lines.join('\n');
+}
+
+function loadGestorEmailSettings() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([GESTOR_EMAIL_SETTINGS_KEY], (result) => {
+      const scoped = result?.[GESTOR_EMAIL_SETTINGS_KEY] || {};
+      const userId = getGestorScopedUserId();
+      resolve(normalizeGestorEmailSettings(userId ? scoped[userId] : null));
+    });
+  });
+}
+
+function saveGestorEmailSettings(settings) {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([GESTOR_EMAIL_SETTINGS_KEY], (result) => {
+      const scoped = result?.[GESTOR_EMAIL_SETTINGS_KEY] || {};
+      const userId = getGestorScopedUserId();
+      if (!userId) {
+        resolve();
+        return;
+      }
+      scoped[userId] = normalizeGestorEmailSettings(settings);
+      chrome.storage.local.set({ [GESTOR_EMAIL_SETTINGS_KEY]: scoped }, resolve);
+    });
+  });
+}
+
+function loadGestorCardStatus() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([GESTOR_CARD_STATUS_KEY], (result) => {
+      const scoped = result?.[GESTOR_CARD_STATUS_KEY] || {};
+      const userId = getGestorScopedUserId();
+      const data = userId ? (scoped[userId] || {}) : {};
+      gestorEmailSentIds = new Set(Array.isArray(data.emailSentIds) ? data.emailSentIds.map(String) : []);
+      gestorCopiedIds = new Set(Array.isArray(data.copiedIds) ? data.copiedIds.map(String) : []);
+      gestorArchivedIds = new Set(Array.isArray(data.archivedIds) ? data.archivedIds.map(String) : []);
+      gestorFefrelloSentIds = new Set(Array.isArray(data.fefrelloSentIds) ? data.fefrelloSentIds.map(String) : []);
+      resolve();
+    });
+  });
+}
+
+function saveGestorCardStatus() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([GESTOR_CARD_STATUS_KEY], (result) => {
+      const scoped = result?.[GESTOR_CARD_STATUS_KEY] || {};
+      const userId = getGestorScopedUserId();
+      if (!userId) {
+        resolve();
+        return;
+      }
+      scoped[userId] = {
+        emailSentIds: [...gestorEmailSentIds],
+        copiedIds: [...gestorCopiedIds],
+        archivedIds: [...gestorArchivedIds],
+        fefrelloSentIds: [...gestorFefrelloSentIds]
+      };
+      chrome.storage.local.set({ [GESTOR_CARD_STATUS_KEY]: scoped }, resolve);
+    });
+  });
+}
+
+async function loadGestorLocalState() {
+  if (!hasAuthSession()) {
+    gestorEmailSettings = normalizeGestorEmailSettings(null);
+    gestorEmailSentIds = new Set();
+    gestorCopiedIds = new Set();
+    gestorArchivedIds = new Set();
+    gestorFefrelloSentIds = new Set();
+    return;
+  }
+  gestorEmailSettings = await loadGestorEmailSettings();
+  await loadGestorCardStatus();
+}
+
+function gestorCardToEmailHtml(p) {
+  const cellLabel = 'style="padding:4px 8px;color:#64748b;width:38%;vertical-align:top"';
+  const cellValue = 'style="padding:4px 8px;vertical-align:top;color:#111827"';
+  return `
+    <div style="font-family:Arial,sans-serif;border:1px solid #e5e7eb;border-radius:10px;padding:16px;max-width:560px;background:#ffffff;">
+      <h3 style="margin:0 0 10px;color:#111827;border-bottom:3px solid #facc15;padding-bottom:8px;font-size:15px;">
+        ${escapeGestorValue(p.login_cliente) || '(sem login)'}
+      </h3>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <tr><td ${cellLabel}><b>Nº da Venda:</b></td><td ${cellValue}>${escapeGestorValue(p.numero_venda) || '—'}</td></tr>
+        <tr><td ${cellLabel}><b>Modelo:</b></td><td ${cellValue}>${escapeGestorValue(p.modelo) || '—'}</td></tr>
+        ${p.observacoes ? `<tr><td ${cellLabel}><b>Observações:</b></td><td ${cellValue}>${escapeGestorValue(p.observacoes)}</td></tr>` : ''}
+        ${p.url ? `<tr><td ${cellLabel}><b>Link da venda:</b></td><td ${cellValue}><a href="${escapeGestorValue(p.url)}" style="color:#4f46e5;text-decoration:none;font-weight:600;">Abrir venda</a></td></tr>` : ''}
+      </table>
+    </div>
+  `;
+}
+
+function gestorCardToRichHtml(p) {
+  const cellLabel = 'style="padding:4px 8px;color:#64748b;width:38%;vertical-align:top"';
+  const cellValue = 'style="padding:4px 8px;vertical-align:top;color:#111827"';
+  const aroRows = parseGestorAros(p.aro)
+    .flatMap((aro) => {
+      const rows = [];
+      if (aro.model && /^Avulso\s+\d+/i.test(aro.label || '')) {
+        rows.push(`<tr><td ${cellLabel}><b>Modelo ${escapeGestorValue(aro.label)}:</b></td><td ${cellValue}>${escapeGestorValue(aro.model)}</td></tr>`);
+      }
+      if (aro.value) {
+        rows.push(`<tr><td ${cellLabel}><b>${escapeGestorValue(aro.label)}:</b></td><td ${cellValue}>${escapeGestorValue(aro.value)}</td></tr>`);
+      }
+      return rows;
+    })
+    .join('');
+  return `
+    <div style="font-family:Arial,sans-serif;border:1px solid #e5e7eb;border-radius:10px;padding:16px;max-width:560px;background:#ffffff;">
+      <h3 style="margin:0 0 10px;color:#111827;border-bottom:3px solid #facc15;padding-bottom:8px;font-size:15px;">
+        ${escapeGestorValue(p.login_cliente) || '(sem login)'}
+      </h3>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        <tr><td ${cellLabel}><b>Venda:</b></td><td ${cellValue}>${escapeGestorValue(p.numero_venda) || '-'}</td></tr>
+        <tr><td ${cellLabel}><b>Modelo:</b></td><td ${cellValue}>${escapeGestorValue(p.modelo) || '-'}</td></tr>
+        ${aroRows}
+        ${p.observacoes ? `<tr><td ${cellLabel}><b>Observações:</b></td><td ${cellValue}>${escapeGestorValue(p.observacoes)}</td></tr>` : ''}
+        ${p.url ? `<tr><td ${cellLabel}><b>Link da venda:</b></td><td ${cellValue}><a href="${escapeGestorValue(p.url)}" style="color:#4f46e5;text-decoration:none;font-weight:600;">Abrir venda</a></td></tr>` : ''}
+      </table>
+    </div>
+  `;
+}
+
+function getGestorGmailToken() {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: 'GET_GMAIL_TOKEN' }, (response) => {
+      if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+      if (response?.error) return reject(new Error(response.error));
+      resolve(response.token);
+    });
+  });
+}
+
+async function sendGestorEmail(subject, html) {
+  const token = await getGestorGmailToken();
+  const settings = normalizeGestorEmailSettings(gestorEmailSettings);
+  const subjectEncoded = `=?UTF-8?B?${btoa(unescape(encodeURIComponent(subject)))}?=`;
+  const rawLines = [
+    `To: ${settings.emailTo}`,
+    settings.emailCC ? `Cc: ${settings.emailCC}` : null,
+    `Subject: ${subjectEncoded}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/html; charset=UTF-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    btoa(unescape(encodeURIComponent(html)))
+  ].filter((value) => value !== null);
+  const raw = rawLines.join('\r\n');
+  const encodedRaw = btoa(raw).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ raw: encodedRaw })
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err?.error?.message || `Gmail API: HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+async function loadGestorPendencias() {
+  if (!hasAuthSession()) {
+    gestorPendencias = [];
+    gestorLoading = false;
+    syncGestorButton();
+    renderGestorPanelContent(document.getElementById('sp-gestor-panel'));
+    return;
+  }
+
+  gestorLoading = true;
+  renderGestorPanelContent(document.getElementById('sp-gestor-panel'));
+  try {
+    const rows = await sbFetch(`/rest/v1/pendencias?user_id=eq.${auth.user.id}&order=created_at.desc&select=*`);
+    gestorPendencias = Array.isArray(rows) ? rows : [];
+  } finally {
+    gestorLoading = false;
+    syncGestorButton();
+    renderGestorPanelContent(document.getElementById('sp-gestor-panel'));
+  }
+}
+
+async function createGestorPendencia(fields) {
+  const rows = await sbFetch('/rest/v1/pendencias', {
+    method: 'POST',
+    headers: {
+      Prefer: 'return=representation'
+    },
+    body: JSON.stringify({
+      user_id: auth.user.id,
+      ...fields
+    })
+  });
+
+  return rows?.[0] || null;
+}
+
+async function updateGestorPendencia(id, fields) {
+  await sbFetch(`/rest/v1/pendencias?id=eq.${id}`, {
+    method: 'PATCH',
+    headers: {
+      Prefer: 'return=minimal'
+    },
+    body: JSON.stringify({
+      ...fields,
+      updated_at: new Date().toISOString()
+    })
+  });
+}
+
+async function deleteGestorPendencia(id) {
+  await sbFetch(`/rest/v1/pendencias?id=eq.${id}`, {
+    method: 'DELETE'
+  });
+}
+
 function createTopBar() {
   if (document.getElementById('sp-topbar')) return;
   const bar = document.createElement('div');
@@ -33,6 +903,26 @@ function createTopBar() {
     <path d="M6 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
   </svg>`;
 
+  const iconOrders = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6 6h15"/>
+    <path d="M6 12h15"/>
+    <path d="M6 18h15"/>
+    <path d="M3 6h.01"/>
+    <path d="M3 12h.01"/>
+    <path d="M3 18h.01"/>
+  </svg>`;
+
+  const iconAccount = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+    <circle cx="12" cy="7" r="4"/>
+  </svg>`;
+
+  const iconGestor = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/>
+    <path d="m3.3 7 8.7 5 8.7-5"/>
+    <path d="M12 22V12"/>
+  </svg>`;
+
   bar.innerHTML = `
     <button id="sp-btn-passo"   class="sp-btn" title="Mensagem Rápida (Alt+M)">${iconPasso}</button>
     <div class="sp-sep"></div>
@@ -42,12 +932,27 @@ function createTopBar() {
       ${iconCounter}
       <span class="sp-counter-badge" id="sp-counter-badge"></span>
     </button>
+    <div class="sp-sep"></div>
+    <button id="sp-btn-orders" class="sp-btn" title="Pegador de Pedidos (Alt+P)">${iconOrders}</button>
+    <div class="sp-sep"></div>
+    <button id="sp-btn-gestor" class="sp-btn" title="Gestor de Pendências (Alt+G)">
+      ${iconGestor}
+      <span class="sp-gestor-badge" id="sp-gestor-badge"></span>
+    </button>
+    <div class="sp-sep"></div>
+    <button id="sp-btn-auth" class="sp-btn" title="Conta do Hub (Alt+U)">
+      ${iconAccount}
+      <span class="sp-auth-badge" id="sp-auth-badge"></span>
+    </button>
   `;
   document.body.appendChild(bar);
 
   const btnPasso   = bar.querySelector('#sp-btn-passo');
   const btnClip    = bar.querySelector('#sp-btn-clip');
   const btnCounter = bar.querySelector('#sp-btn-counter');
+  const btnOrders  = bar.querySelector('#sp-btn-orders');
+  const btnGestor  = bar.querySelector('#sp-btn-gestor');
+  const btnAuth    = bar.querySelector('#sp-btn-auth');
 
   // ── Button handlers ──────────────────────────────────────────
 
@@ -82,6 +987,18 @@ function createTopBar() {
     });
   });
 
+  btnOrders?.addEventListener('click', () => {
+    toggleOrderPickerPanel();
+  });
+
+  btnGestor?.addEventListener('click', () => {
+    toggleGestorPanel();
+  });
+
+  btnAuth?.addEventListener('click', () => {
+    toggleAuthPanel();
+  });
+
   // ── Keyboard shortcuts ───────────────────────────────────────
   document.addEventListener('keydown', (e) => {
     if (!e.altKey || e.ctrlKey || e.metaKey) return;
@@ -95,12 +1012,153 @@ function createTopBar() {
     } else if (e.key === 'r' || e.key === 'R') {
       e.preventDefault();
       btnCounter.click();
+    } else if ((e.key === 'p' || e.key === 'P') && btnOrders) {
+      e.preventDefault();
+      btnOrders.click();
+    } else if ((e.key === 'g' || e.key === 'G') && btnGestor) {
+      e.preventDefault();
+      btnGestor.click();
+    } else if ((e.key === 'u' || e.key === 'U') && btnAuth) {
+      e.preventDefault();
+      btnAuth.click();
     }
   });
 
   // Busca contagem inicial ao criar a barra
   chrome.runtime.sendMessage({ action: 'getTabCount' }, (r) => {
     if (r) updateCounterBadge(r.count);
+  });
+  syncGestorButton();
+  syncAuthButton();
+  upgradeTopBarLayout(bar);
+}
+
+function normalizeTopBarOrder(order) {
+  const sanitized = Array.isArray(order) ? order.filter((key) => HUB_DEFAULT_BUTTON_ORDER.includes(key)) : [];
+  const unique = [];
+  sanitized.forEach((key) => {
+    if (!unique.includes(key)) unique.push(key);
+  });
+  HUB_DEFAULT_BUTTON_ORDER.forEach((key) => {
+    if (!unique.includes(key)) unique.push(key);
+  });
+  return unique;
+}
+
+function saveTopBarOrder(order) {
+  chrome.storage.local.set({ [HUB_BUTTON_ORDER_KEY]: normalizeTopBarOrder(order) });
+}
+
+function getTopBarCurrentOrder(bar) {
+  return Array.from(bar.querySelectorAll('.sp-topbar-main .sp-topbar-item')).map((item) => item.dataset.key);
+}
+
+function bindTopBarItemDrag(bar, item) {
+  if (!item || item.dataset.dragBound === 'true') return;
+  item.dataset.dragBound = 'true';
+
+  item.addEventListener('dragstart', () => {
+    item.classList.add('is-dragging');
+    bar.dataset.draggingKey = item.dataset.key || '';
+  });
+
+  item.addEventListener('dragend', () => {
+    item.classList.remove('is-dragging');
+    bar.querySelectorAll('.sp-topbar-item').forEach((node) => node.classList.remove('is-drop-target'));
+    delete bar.dataset.draggingKey;
+  });
+
+  item.addEventListener('dragover', (event) => {
+    event.preventDefault();
+    if ((bar.dataset.draggingKey || '') === (item.dataset.key || '')) return;
+    bar.querySelectorAll('.sp-topbar-main .sp-topbar-item').forEach((node) => node.classList.remove('is-drop-target'));
+    item.classList.add('is-drop-target');
+  });
+
+  item.addEventListener('dragleave', () => {
+    item.classList.remove('is-drop-target');
+  });
+
+  item.addEventListener('drop', (event) => {
+    event.preventDefault();
+    const draggedKey = bar.dataset.draggingKey || '';
+    const targetKey = item.dataset.key || '';
+    item.classList.remove('is-drop-target');
+    if (!draggedKey || !targetKey || draggedKey === targetKey) return;
+
+    const order = getTopBarCurrentOrder(bar).filter((key) => key !== draggedKey);
+    const targetIndex = order.indexOf(targetKey);
+    const rect = item.getBoundingClientRect();
+    const insertAfter = event.clientX > rect.left + rect.width / 2;
+    order.splice(targetIndex + (insertAfter ? 1 : 0), 0, draggedKey);
+    saveTopBarOrder(order);
+    renderTopBarLayout(bar, order);
+  });
+}
+
+function renderTopBarLayout(bar, order = HUB_DEFAULT_BUTTON_ORDER) {
+  if (!bar) return;
+
+  const defs = {
+    passo: { id: 'sp-btn-passo', label: 'Mensagem' },
+    clip: { id: 'sp-btn-clip', label: 'Gravação' },
+    counter: { id: 'sp-btn-counter', label: 'N. de Página' },
+    orders: { id: 'sp-btn-orders', label: 'Pedidos' },
+    gestor: { id: 'sp-btn-gestor', label: 'Pendências' },
+    auth: { id: 'sp-btn-auth', label: 'Conta' },
+  };
+
+  const normalizedOrder = normalizeTopBarOrder(order);
+  const buttons = {};
+  Object.values(defs).forEach((def) => {
+    const button = document.getElementById(def.id);
+    if (button) buttons[def.id] = button;
+  });
+
+  bar.innerHTML = '';
+
+  const main = document.createElement('div');
+  main.className = 'sp-topbar-main';
+  normalizedOrder.forEach((key) => {
+    const def = defs[key];
+    const button = buttons[def.id];
+    if (!button) return;
+    const item = document.createElement('div');
+    item.className = 'sp-topbar-item';
+    item.dataset.key = key;
+    item.draggable = true;
+    item.appendChild(button);
+    const label = document.createElement('span');
+    label.className = 'sp-btn-label';
+    label.textContent = def.label;
+    item.appendChild(label);
+    bindTopBarItemDrag(bar, item);
+    main.appendChild(item);
+  });
+
+  bar.appendChild(main);
+  const authButton = buttons[defs.auth.id];
+  if (authButton) {
+    const side = document.createElement('div');
+    side.className = 'sp-topbar-side';
+    const item = document.createElement('div');
+    item.className = 'sp-topbar-item';
+    item.appendChild(authButton);
+    const label = document.createElement('span');
+    label.className = 'sp-btn-label';
+    label.textContent = defs.auth.label;
+    item.appendChild(label);
+    side.appendChild(item);
+    bar.appendChild(side);
+  }
+}
+
+function upgradeTopBarLayout(bar) {
+  if (!bar || bar.dataset.layoutEnhanced === 'true') return;
+  bar.dataset.layoutEnhanced = 'true';
+  renderTopBarLayout(bar, HUB_DEFAULT_BUTTON_ORDER);
+  chrome.storage.local.get([HUB_BUTTON_ORDER_KEY], (result) => {
+    renderTopBarLayout(bar, normalizeTopBarOrder(result?.[HUB_BUTTON_ORDER_KEY]));
   });
 }
 
@@ -118,6 +1176,1770 @@ function updateCounterBadge(count) {
 // ══════════════════════════════════════════════════════════════
 // MÓDULO: SENTINELA RANGER (Monitoramento automático de página)
 // ══════════════════════════════════════════════════════════════
+
+function syncAuthButton() {
+  const btn = document.getElementById('sp-btn-auth');
+  const badge = document.getElementById('sp-auth-badge');
+  if (!btn || !badge) return;
+
+  const email = auth.user?.email || '';
+  const initial = email ? email.charAt(0).toUpperCase() : '';
+
+  btn.classList.toggle('sp-active', hasAuthSession());
+  btn.title = hasAuthSession() ? `Conta conectada: ${email}` : 'Conta do Hub (Alt+U)';
+  badge.textContent = initial;
+  badge.dataset.connected = hasAuthSession() ? 'true' : 'false';
+
+  const panel = document.getElementById('sp-auth-panel');
+  if (panel) renderAuthPanelContent(panel);
+}
+
+function setAuthPanelStatus(message = '', tone = 'info') {
+  const status = document.getElementById('sp-auth-status');
+  if (!status) return;
+  status.textContent = message;
+  status.dataset.tone = tone;
+}
+
+function renderAuthPanelContent(panel) {
+  panel.innerHTML = hasAuthSession()
+    ? `
+      <div class="sp-auth-panel__header">
+        <strong>Conta do Hub</strong>
+        <button type="button" id="sp-auth-close" class="sp-auth-close" aria-label="Fechar">x</button>
+      </div>
+      <p class="sp-auth-copy">Conectado com a conta que será usada pelo Gestor e pelo Passo Largo.</p>
+      <div class="sp-auth-summary">
+        <span class="sp-auth-avatar">${(auth.user?.email || '?').charAt(0).toUpperCase()}</span>
+        <div>
+          <strong>${escapeHtml(auth.user?.email || 'Conta conectada')}</strong>
+          <p>Sessão ativa neste navegador.</p>
+        </div>
+      </div>
+      <button type="button" id="sp-auth-logout" class="sp-auth-run sp-auth-run--danger">Sair</button>
+      <p id="sp-auth-status" class="sp-auth-status" data-tone="info"></p>
+    `
+    : `
+      <div class="sp-auth-panel__header">
+        <strong>Conta do Hub</strong>
+        <button type="button" id="sp-auth-close" class="sp-auth-close" aria-label="Fechar">x</button>
+      </div>
+      <p class="sp-auth-copy">Entre com a mesma conta do Gestor de Pendências. O Passo Largo vai usar essa conta depois.</p>
+      <label class="sp-auth-field">
+        <span>E-mail</span>
+        <input id="sp-auth-email" type="email" autocomplete="username" placeholder="voce@empresa.com" />
+      </label>
+      <label class="sp-auth-field">
+        <span>Senha</span>
+        <input id="sp-auth-password" type="password" autocomplete="current-password" placeholder="Sua senha" />
+      </label>
+      <button type="button" id="sp-auth-login" class="sp-auth-run">Entrar</button>
+      <p id="sp-auth-status" class="sp-auth-status" data-tone="info"></p>
+    `;
+
+  bindAuthPanelEvents(panel);
+}
+
+function bindAuthPanelEvents(panel) {
+  panel.querySelector('#sp-auth-close')?.addEventListener('click', closeAuthPanel);
+
+  if (hasAuthSession()) {
+    panel.querySelector('#sp-auth-logout')?.addEventListener('click', onAuthLogout);
+    return;
+  }
+
+  const loginButton = panel.querySelector('#sp-auth-login');
+  const emailInput = panel.querySelector('#sp-auth-email');
+  const passwordInput = panel.querySelector('#sp-auth-password');
+
+  loginButton?.addEventListener('click', onAuthLogin);
+  [emailInput, passwordInput].forEach((input) => {
+    input?.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        onAuthLogin();
+      }
+    });
+  });
+}
+
+function createAuthPanel() {
+  const existingPanel = document.getElementById('sp-auth-panel');
+  if (existingPanel) return existingPanel;
+
+  const panel = document.createElement('section');
+  panel.id = 'sp-auth-panel';
+  renderAuthPanelContent(panel);
+  document.body.appendChild(panel);
+  return panel;
+}
+
+function openAuthPanel() {
+  const panel = createAuthPanel();
+  panel.classList.add('visible');
+  document.getElementById('sp-btn-auth')?.classList.add('sp-active');
+  renderAuthPanelContent(panel);
+
+  if (!hasAuthSession()) {
+    panel.querySelector('#sp-auth-email')?.focus();
+  }
+}
+
+function closeAuthPanel() {
+  document.getElementById('sp-auth-panel')?.classList.remove('visible');
+  document.getElementById('sp-btn-auth')?.classList.toggle('sp-active', hasAuthSession());
+}
+
+function toggleAuthPanel() {
+  const panel = createAuthPanel();
+  if (panel.classList.contains('visible')) {
+    closeAuthPanel();
+  } else {
+    openAuthPanel();
+  }
+}
+
+async function onAuthLogin() {
+  const panel = createAuthPanel();
+  const emailInput = panel.querySelector('#sp-auth-email');
+  const passwordInput = panel.querySelector('#sp-auth-password');
+  const loginButton = panel.querySelector('#sp-auth-login');
+  const email = emailInput?.value?.trim();
+  const password = passwordInput?.value || '';
+
+  if (!email || !password) {
+    setAuthPanelStatus('Preencha e-mail e senha.', 'error');
+    return;
+  }
+
+  if (loginButton) loginButton.disabled = true;
+  setAuthPanelStatus('Entrando...', 'info');
+
+  try {
+    const session = await signIn(email, password);
+    auth.token = session.access_token;
+    auth.refreshToken = session.refresh_token;
+    auth.user = session.user;
+    await saveSession({
+      access_token: session.access_token,
+      refresh_token: session.refresh_token,
+      user: session.user
+    });
+    notifyAuthChanged();
+    openAuthPanel();
+    setAuthPanelStatus('Login realizado com sucesso.', 'success');
+    mostrarNotificacao('Conta conectada no Sentinela Pro.');
+  } catch (error) {
+    setAuthPanelStatus(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    if (loginButton) loginButton.disabled = false;
+  }
+}
+
+async function onAuthLogout() {
+  const panel = createAuthPanel();
+  const logoutButton = panel.querySelector('#sp-auth-logout');
+  if (logoutButton) logoutButton.disabled = true;
+  setAuthPanelStatus('Saindo...', 'info');
+
+  try {
+    await signOut();
+    chrome.runtime.sendMessage({ type: 'REVOKE_GMAIL_TOKEN' });
+    await clearSession();
+    auth = { user: null, token: null, refreshToken: null };
+    notifyAuthChanged();
+    openAuthPanel();
+    setAuthPanelStatus('Sessão encerrada.', 'success');
+    mostrarNotificacao('Conta desconectada.');
+  } catch (error) {
+    setAuthPanelStatus(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    if (logoutButton) logoutButton.disabled = false;
+  }
+}
+
+function syncGestorButton() {
+  const btn = document.getElementById('sp-btn-gestor');
+  const badge = document.getElementById('sp-gestor-badge');
+  if (!btn || !badge) return;
+
+  const count = getGestorActiveCount();
+  badge.textContent = count > 0 ? String(count) : '';
+  badge.dataset.count = count;
+  btn.title = hasAuthSession()
+    ? `Gestor de Pendências (${count})`
+    : 'Gestor de Pendências (Alt+G)';
+}
+
+function setGestorStatus(message = '', tone = 'info') {
+  const status = document.getElementById('sp-gestor-status');
+  if (!status) return;
+  status.textContent = message;
+  status.dataset.tone = tone;
+}
+
+function gestorFieldInput(name, label, value, placeholder, wide = false) {
+  return `
+    <label class="sp-gestor-edit-field${wide ? ' is-wide' : ''}">
+      <span>${label}</span>
+      <input type="text" data-gestor-field="${name}" value="${escapeGestorValue(value)}" placeholder="${escapeGestorValue(placeholder)}" />
+    </label>
+  `;
+}
+
+function gestorFieldTextarea(name, label, value, placeholder) {
+  return `
+    <label class="sp-gestor-edit-field is-wide">
+      <span>${label}</span>
+      <textarea data-gestor-field="${name}" rows="4" placeholder="${escapeGestorValue(placeholder)}">${escapeGestorValue(value)}</textarea>
+    </label>
+  `;
+}
+
+function gestorHiddenField(name, value) {
+  return `<input type="hidden" data-gestor-field="${name}" value="${escapeGestorValue(value)}" />`;
+}
+
+function getGestorActionIcon(type) {
+  switch (type) {
+    case 'archive':
+      return `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 7.5 5 4h14l2 3.5"></path>
+          <path d="M4 7h16v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V7z"></path>
+          <path d="M9 12h6"></path>
+        </svg>
+      `;
+    case 'return':
+      return `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M9 14l-4-4 4-4"></path>
+          <path d="M5 10h9a5 5 0 1 1 0 10h-1"></path>
+        </svg>
+      `;
+    case 'delete':
+      return `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M3 6h18"></path>
+          <path d="M8 6V4h8v2"></path>
+          <path d="M7 6l1 14h8l1-14"></path>
+          <path d="M10 10v6"></path>
+          <path d="M14 10v6"></path>
+        </svg>
+      `;
+    case 'edit':
+    default:
+      return `
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 20h9"></path>
+          <path d="M16.5 3.5a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4 12.5-12.5z"></path>
+        </svg>
+      `;
+  }
+}
+
+function renderGestorIconButton({ action, id, title, iconType, danger = false, active = false, tone = '' }) {
+  return `
+    <button
+      type="button"
+      class="sp-gestor-icon-btn${danger ? ' sp-gestor-icon-btn--danger' : ''}${tone ? ` sp-gestor-icon-btn--${escapeGestorValue(tone)}` : ''}${active ? ' is-active' : ''}"
+      data-action="${escapeGestorValue(action)}"
+      data-id="${escapeGestorValue(id)}"
+      title="${escapeGestorValue(title)}"
+      aria-label="${escapeGestorValue(title)}"
+    >
+      ${getGestorActionIcon(iconType)}
+    </button>
+  `;
+}
+
+function collectGestorFields(card) {
+  const fields = {};
+  card.querySelectorAll('[data-gestor-field]').forEach((field) => {
+    fields[field.dataset.gestorField] = field.value || '';
+  });
+  const aroFields = collectGestorArosFromScope(card);
+  fields.aro = buildGestorAroValue(aroFields);
+  return fields;
+}
+
+function createGestorBatchModal() {
+  const existing = document.getElementById('sp-gestor-batch-overlay');
+  if (existing) return existing;
+
+  const overlay = document.createElement('div');
+  overlay.id = 'sp-gestor-batch-overlay';
+  overlay.innerHTML = `
+    <div class="sp-gestor-batch-modal">
+      <div class="sp-gestor-batch-modal__header">
+        <div>
+          <strong>Consolidado de Pendências</strong>
+          <p id="sp-gestor-batch-count" class="sp-gestor-batch-modal__copy"></p>
+        </div>
+        <button type="button" id="sp-gestor-batch-close" class="sp-gestor-close" aria-label="Fechar">x</button>
+      </div>
+      <div id="sp-gestor-batch-list" class="sp-gestor-batch-list"></div>
+      <div class="sp-gestor-batch-modal__footer">
+        <button type="button" id="sp-gestor-batch-copy" class="sp-gestor-action">Copiar selecionados</button>
+        <button type="button" id="sp-gestor-batch-individual" class="sp-gestor-action">Enviar individual</button>
+        <button type="button" id="sp-gestor-batch-consolidated" class="sp-gestor-action sp-gestor-action--primary">Enviar consolidado</button>
+      </div>
+    </div>
+  `;
+  overlay._selectedIds = new Set();
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) {
+      closeGestorBatchModal();
+    }
+  });
+  overlay.querySelector('.sp-gestor-batch-modal')?.addEventListener('click', (event) => event.stopPropagation());
+  document.body.appendChild(overlay);
+  return overlay;
+}
+
+function closeGestorBatchModal() {
+  document.getElementById('sp-gestor-batch-overlay')?.classList.remove('visible');
+}
+
+function renderGestorBatchModal() {
+  const overlay = createGestorBatchModal();
+  const list = overlay.querySelector('#sp-gestor-batch-list');
+  const count = overlay.querySelector('#sp-gestor-batch-count');
+  const selectedIds = overlay._selectedIds || new Set();
+  const activeItems = getGestorVisiblePendencias('pendencias');
+
+  if (!list || !count) return;
+
+  count.textContent = `${selectedIds.size} de ${activeItems.length} selecionada(s)`;
+
+  list.innerHTML = activeItems.length
+    ? activeItems.map((item) => {
+        const selected = selectedIds.has(String(item.id));
+        return `
+          <button type="button" class="sp-gestor-batch-item${selected ? ' is-selected' : ''}" data-id="${escapeGestorValue(item.id)}">
+            <span class="sp-gestor-batch-item__check">${selected ? 'OK' : ''}</span>
+            <span class="sp-gestor-batch-item__content">
+              <strong>${escapeGestorValue(item.login_cliente || '(sem login)')}</strong>
+              <span>${item.numero_venda ? `#${escapeGestorValue(item.numero_venda)}` : 'Sem venda'}${item.modelo ? ` • ${escapeGestorValue(item.modelo)}` : ''}</span>
+            </span>
+          </button>
+        `;
+      }).join('')
+    : '<div class="sp-gestor-empty">Nenhuma pendência ativa para envio.</div>';
+
+  list.querySelectorAll('.sp-gestor-batch-item').forEach((button) => {
+    button.addEventListener('click', () => {
+      const id = String(button.dataset.id || '');
+      if (!id) return;
+      if (selectedIds.has(id)) {
+        selectedIds.delete(id);
+      } else {
+        selectedIds.add(id);
+      }
+      overlay._selectedIds = selectedIds;
+      renderGestorBatchModal();
+    });
+  });
+
+  overlay.querySelector('#sp-gestor-batch-close')?.addEventListener('click', closeGestorBatchModal);
+  overlay.querySelector('#sp-gestor-batch-copy')?.addEventListener('click', onGestorCopySelectedAction);
+  overlay.querySelector('#sp-gestor-batch-consolidated')?.addEventListener('click', onGestorSendConsolidatedAction);
+  overlay.querySelector('#sp-gestor-batch-individual')?.addEventListener('click', onGestorSendIndividualAllAction);
+}
+
+function openGestorBatchModal() {
+  const activeItems = getGestorVisiblePendencias('pendencias');
+  if (!activeItems.length) {
+    setGestorStatus('Nenhuma pendência ativa para envio em lote.', 'error');
+    return;
+  }
+
+  const overlay = createGestorBatchModal();
+  overlay._selectedIds = new Set(activeItems.map((item) => String(item.id)));
+  renderGestorBatchModal();
+  overlay.classList.add('visible');
+}
+
+function getSelectedGestorBatchItems() {
+  const overlay = createGestorBatchModal();
+  const selectedIds = overlay._selectedIds || new Set();
+  return getGestorVisiblePendencias('pendencias').filter((item) => selectedIds.has(String(item.id)));
+}
+
+function renderGestorCards(tab = gestorCurrentTab) {
+  const items = getGestorVisiblePendencias(tab);
+  if (gestorLoading) {
+    return '<div class="sp-gestor-empty">Carregando pendências...</div>';
+  }
+
+  if (!items.length) {
+    if (tab === 'historico' && gestorHistoryFilter.trim()) {
+      return '<div class="sp-gestor-empty">Nenhuma pendência encontrada para esse filtro.</div>';
+    }
+    return `<div class="sp-gestor-empty">${tab === 'historico' ? 'Nenhuma pendência arquivada.' : 'Nenhuma pendência cadastrada.'}</div>`;
+  }
+
+  return items.map((p) => `
+    <article class="sp-gestor-card${gestorArchivedIds.has(String(p.id)) ? ' is-archived' : ''}${gestorExpandedCardId === String(p.id) ? ' is-expanded' : ''}" data-id="${escapeGestorValue(p.id)}">
+      <div class="sp-gestor-card__summary" data-action="toggle-card" data-id="${escapeGestorValue(p.id)}">
+        <div class="sp-gestor-card__top">
+          <div class="sp-gestor-card__identity">
+            <strong>${escapeGestorValue(p.login_cliente || 'Pendencia')}</strong>
+            <span>${escapeGestorValue(formatGestorDate(p.created_at) || 'Sem data')}</span>
+          </div>
+          <div class="sp-gestor-card__top-side">
+            ${gestorEmailSentIds.has(String(p.id)) ? '<span class="sp-gestor-card__flag">Email enviado</span>' : ''}
+            <div class="sp-gestor-card__quick-actions">
+              ${renderGestorIconButton({
+                action: 'archive',
+                id: p.id,
+                title: gestorArchivedIds.has(String(p.id)) ? 'Retornar' : 'Arquivar',
+                iconType: gestorArchivedIds.has(String(p.id)) ? 'return' : 'archive',
+                active: gestorArchivedIds.has(String(p.id)),
+                tone: 'archive'
+              })}
+              ${renderGestorIconButton({
+                action: 'delete',
+                id: p.id,
+                title: 'Excluir',
+                iconType: 'delete',
+                danger: true
+              })}
+              ${renderGestorIconButton({
+                action: 'toggle-card',
+                id: p.id,
+                title: gestorExpandedCardId === String(p.id) ? 'Fechar edicao' : 'Editar',
+                iconType: 'edit',
+                active: gestorExpandedCardId === String(p.id)
+              })}
+            </div>
+          </div>
+        </div>
+        <div class="sp-gestor-card__meta">
+          ${p.numero_venda ? `<span>#${escapeGestorValue(p.numero_venda)}</span>` : '<span>Sem venda</span>'}
+          ${p.modelo ? `<span>${escapeGestorValue(p.modelo)}</span>` : ''}
+          ${p.updated_at ? `<span>Atualizado</span>` : ''}
+        </div>
+        ${p.observacoes ? `<p class="sp-gestor-card__obs">${escapeGestorValue(p.observacoes)}</p>` : ''}
+        ${p.url ? `<a class="sp-gestor-card__link" href="${escapeGestorValue(p.url)}" target="_blank" rel="noreferrer">Abrir URL</a>` : ''}
+        <div class="sp-gestor-card__actions">
+          <button type="button" class="sp-gestor-chip sp-gestor-chip--fefrello${gestorFefrelloSentIds.has(String(p.id)) ? ' is-done' : ''}" data-action="fefrello" data-id="${escapeGestorValue(p.id)}" ${gestorFefrelloSentIds.has(String(p.id)) ? 'disabled' : ''}>${gestorFefrelloSentIds.has(String(p.id)) ? 'Enviado ao Fefrello' : 'Fefrello'}</button>
+          <button type="button" class="sp-gestor-chip sp-gestor-chip--mail${gestorEmailSentIds.has(String(p.id)) ? ' is-done' : ''}" data-action="email" data-id="${escapeGestorValue(p.id)}">${gestorEmailSentIds.has(String(p.id)) ? 'Email enviado' : 'Enviar email'}</button>
+          <button type="button" class="sp-gestor-chip sp-gestor-chip--copy${gestorCopiedIds.has(String(p.id)) ? ' is-done' : ''}" data-action="copy" data-id="${escapeGestorValue(p.id)}">${gestorCopiedIds.has(String(p.id)) ? 'Copiado' : 'Copiar'}</button>
+        </div>
+      </div>
+      <div class="sp-gestor-card__body">
+        <div class="sp-gestor-edit-grid">
+          ${gestorFieldInput('login_cliente', 'Login', p.login_cliente, 'Apelido do comprador')}
+          ${gestorFieldInput('modelo', 'Modelo', p.modelo, 'Descreva o modelo')}
+          ${gestorHiddenField('numero_venda', p.numero_venda)}
+          ${gestorHiddenField('url', p.url)}
+          ${renderGestorAroFields(parseGestorAros(p.aro), 'card')}
+          ${gestorFieldTextarea('observacoes', 'Observações', p.observacoes, 'Detalhes adicionais...')}
+        </div>
+        <div class="sp-gestor-card__footer">
+          <button type="button" class="sp-gestor-action" data-action="cancel-edit" data-id="${escapeGestorValue(p.id)}">Fechar</button>
+          <button type="button" class="sp-gestor-action sp-gestor-action--primary" data-action="save-card" data-id="${escapeGestorValue(p.id)}">Salvar</button>
+        </div>
+      </div>
+    </article>
+  `).join('');
+}
+
+function renderGestorPanelContent(panel) {
+  if (!panel) return;
+  const activeCount = getGestorActiveCount();
+  const archivedCount = getGestorArchivedCount();
+  const visibleArchivedCount = getGestorVisiblePendencias('historico').length;
+  const emailSettings = normalizeGestorEmailSettings(gestorEmailSettings);
+
+  panel.innerHTML = hasAuthSession()
+    ? `
+      <div class="sp-gestor-panel__header">
+        <div>
+          <strong>Gestor de Pendências</strong>
+        </div>
+        <button type="button" id="sp-gestor-close" class="sp-gestor-close" aria-label="Fechar">x</button>
+      </div>
+      <div class="sp-gestor-tabs">
+        <button type="button" class="sp-gestor-tab${gestorCurrentTab === 'pendencias' ? ' is-active' : ''}" data-tab="pendencias">Pendências <span>${activeCount}</span></button>
+        <button type="button" class="sp-gestor-tab${gestorCurrentTab === 'historico' ? ' is-active' : ''}" data-tab="historico">Histórico <span>${archivedCount}</span></button>
+        <button type="button" class="sp-gestor-tab${gestorCurrentTab === 'ajustes' ? ' is-active' : ''}" data-tab="ajustes">Ajustes</button>
+      </div>
+      <section class="sp-gestor-view${gestorCurrentTab === 'pendencias' ? ' is-active' : ''}" data-view="pendencias">
+        <div class="sp-gestor-toolbar">
+          <button type="button" id="sp-gestor-refresh" class="sp-gestor-action">Atualizar</button>
+          <button type="button" id="sp-gestor-batch" class="sp-gestor-action">Consolidado</button>
+          <button type="button" id="sp-gestor-capture" class="sp-gestor-action">Capturar página</button>
+          <button type="button" id="sp-gestor-toggle-form" class="sp-gestor-action sp-gestor-action--primary">Nova pendência</button>
+        </div>
+        <form id="sp-gestor-form" class="sp-gestor-form sp-hidden">
+          <div class="sp-gestor-form__grid">
+            <label class="sp-gestor-field">
+              <span>Login</span>
+              <input id="sp-gestor-login" type="text" placeholder="Cliente" />
+            </label>
+            <label class="sp-gestor-field">
+              <span>Modelo</span>
+              <input id="sp-gestor-modelo" type="text" placeholder="Modelo" />
+            </label>
+          </div>
+          <input id="sp-gestor-venda" type="hidden" />
+          <input id="sp-gestor-url" type="hidden" value="${escapeGestorValue(window.location.href.includes('mercadol') ? window.location.href : '')}" />
+          <p class="sp-gestor-form__hint">Venda e link são capturados automaticamente da página atual.</p>
+          <div id="sp-gestor-aro-fields" class="sp-gestor-edit-grid sp-gestor-aro-grid">${renderGestorAroFields([], 'form')}</div>
+          <label class="sp-gestor-field">
+            <span>Observações</span>
+            <textarea id="sp-gestor-obs" rows="4" placeholder="Detalhes da pendência"></textarea>
+          </label>
+          <div class="sp-gestor-form__actions">
+            <button type="button" id="sp-gestor-cancel" class="sp-gestor-action">Cancelar</button>
+            <button type="button" id="sp-gestor-save-fefrello" class="sp-gestor-action sp-gestor-action--success">Fefrello</button>
+            <button type="submit" id="sp-gestor-save" class="sp-gestor-action sp-gestor-action--primary">Salvar</button>
+          </div>
+        </form>
+        <div id="sp-gestor-list" class="sp-gestor-list">${renderGestorCards('pendencias')}</div>
+      </section>
+      <section class="sp-gestor-view${gestorCurrentTab === 'historico' ? ' is-active' : ''}" data-view="historico">
+        <div class="sp-gestor-section-head">
+          <strong>Histórico</strong>
+          <span>${gestorHistoryFilter.trim() ? `${visibleArchivedCount} de ${archivedCount}` : archivedCount} arquivada(s)</span>
+        </div>
+        <div class="sp-gestor-history-toolbar">
+          <label class="sp-gestor-history-search">
+            <span>Buscar</span>
+            <input id="sp-gestor-history-search" type="search" placeholder="Login, venda, modelo, observações..." value="${escapeHtml(gestorHistoryFilter)}" />
+          </label>
+          <button type="button" id="sp-gestor-clear-history" class="sp-gestor-action">Limpar arquivados</button>
+        </div>
+        <div id="sp-gestor-history" class="sp-gestor-list">${renderGestorCards('historico')}</div>
+      </section>
+      <section class="sp-gestor-view${gestorCurrentTab === 'ajustes' ? ' is-active' : ''}" data-view="ajustes">
+        <div class="sp-gestor-settings">
+          <div class="sp-gestor-settings__block">
+            <strong>Conta conectada</strong>
+            <p>${escapeHtml(auth.user?.email || 'Sem conta conectada')}</p>
+          </div>
+          <div class="sp-gestor-settings__block">
+            <strong>Envio por Gmail</strong>
+            <p>Defina destinatário e cópia. O token do Gmail será pedido no primeiro envio.</p>
+          </div>
+          <label class="sp-gestor-field">
+            <span>Destinatario</span>
+            <input id="sp-gestor-email-to" type="email" placeholder="destinatario@email.com" value="${escapeHtml(emailSettings.emailTo)}" />
+          </label>
+          <label class="sp-gestor-field">
+            <span>Copia</span>
+            <input id="sp-gestor-email-cc" type="email" placeholder="copia@email.com" value="${escapeHtml(emailSettings.emailCC)}" />
+          </label>
+          <button type="button" id="sp-gestor-save-email" class="sp-gestor-action sp-gestor-action--primary">Salvar email</button>
+          <div class="sp-gestor-settings__block">
+            <strong>Fefrello</strong>
+            <p>Configure board, coluna e responsavel para criar cards direto do Gestor.</p>
+          </div>
+          <label class="sp-gestor-field">
+            <span>Board</span>
+            <select id="sp-gestor-fefrello-board" class="sp-gestor-select">
+              <option value="">Carregando...</option>
+            </select>
+          </label>
+          <label class="sp-gestor-field">
+            <span>Coluna</span>
+            <select id="sp-gestor-fefrello-column" class="sp-gestor-select" disabled>
+              <option value="">Selecione um board</option>
+            </select>
+          </label>
+          <label class="sp-gestor-field">
+            <span>Responsavel</span>
+            <select id="sp-gestor-fefrello-responsible" class="sp-gestor-select">
+              <option value="">Sem responsavel</option>
+              ${GESTOR_FEFRELLO_RESPONSAVEIS.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('')}
+            </select>
+          </label>
+          <div class="sp-gestor-form__actions">
+            <button type="button" id="sp-gestor-fefrello-refresh" class="sp-gestor-action">Atualizar Fefrello</button>
+            <button type="button" id="sp-gestor-fefrello-save" class="sp-gestor-action sp-gestor-action--primary">Salvar Fefrello</button>
+          </div>
+        </div>
+      </section>
+      <p id="sp-gestor-status" class="sp-gestor-status" data-tone="info"></p>
+    `
+    : `
+      <div class="sp-gestor-panel__header">
+        <div>
+          <strong>Gestor de Pendências</strong>
+          <p class="sp-gestor-subtitle">Entre no hub para sincronizar e enviar emails.</p>
+        </div>
+        <button type="button" id="sp-gestor-close" class="sp-gestor-close" aria-label="Fechar">x</button>
+      </div>
+      <p class="sp-gestor-copy">Entre na Conta do Hub para ver e salvar pendências do Gestor aqui.</p>
+      <button type="button" id="sp-gestor-open-auth" class="sp-gestor-action sp-gestor-action--primary">Abrir login</button>
+      <p id="sp-gestor-status" class="sp-gestor-status" data-tone="info"></p>
+    `;
+
+  bindGestorPanelEvents(panel);
+  makeGestorPanelDraggable(panel);
+}
+
+function bindGestorPanelEvents(panel) {
+  panel.querySelector('#sp-gestor-close')?.addEventListener('click', closeGestorPanel);
+
+  if (!hasAuthSession()) {
+    panel.querySelector('#sp-gestor-open-auth')?.addEventListener('click', () => {
+      closeGestorPanel();
+      openAuthPanel();
+    });
+    return;
+  }
+
+  panel.querySelectorAll('.sp-gestor-tab').forEach((button) => {
+    button.addEventListener('click', () => {
+      gestorCurrentTab = button.dataset.tab || 'pendencias';
+      renderGestorPanelContent(panel);
+    });
+  });
+
+  panel.querySelector('#sp-gestor-refresh')?.addEventListener('click', async () => {
+    setGestorStatus('Atualizando...', 'info');
+    try {
+      await loadGestorPendencias();
+      setGestorStatus('Pendências atualizadas.', 'success');
+    } catch (error) {
+      setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+    }
+  });
+
+  panel.querySelector('#sp-gestor-batch')?.addEventListener('click', openGestorBatchModal);
+
+  panel.querySelector('#sp-gestor-capture')?.addEventListener('click', () => {
+    panel.querySelector('#sp-gestor-form')?.classList.remove('sp-hidden');
+    const captured = fillGestorForm(panel, true);
+    setGestorStatus(
+      captured ? 'Dados da página capturados.' : 'Não encontrei dados suficientes nesta página.',
+      captured ? 'success' : 'error'
+    );
+  });
+
+  panel.querySelector('#sp-gestor-toggle-form')?.addEventListener('click', () => {
+    const form = panel.querySelector('#sp-gestor-form');
+    form?.classList.remove('sp-hidden');
+    fillGestorForm(panel, true);
+  });
+
+  panel.querySelector('#sp-gestor-cancel')?.addEventListener('click', () => {
+    panel.querySelector('#sp-gestor-form')?.classList.add('sp-hidden');
+  });
+
+  panel.querySelector('#sp-gestor-save-fefrello')?.addEventListener('click', onGestorCreateAndSendToFefrello);
+  panel.querySelector('#sp-gestor-save-email')?.addEventListener('click', onGestorSaveEmailSettings);
+  panel.querySelector('#sp-gestor-fefrello-save')?.addEventListener('click', onGestorSaveFefrelloSettings);
+  panel.querySelector('#sp-gestor-fefrello-refresh')?.addEventListener('click', onGestorRefreshFefrelloSettings);
+  panel.querySelector('#sp-gestor-history-search')?.addEventListener('input', (event) => {
+    gestorHistoryFilter = event.target?.value || '';
+    renderGestorPanelContent(panel);
+  });
+  panel.querySelector('#sp-gestor-clear-history')?.addEventListener('click', onGestorClearArchivedAction);
+  panel.querySelector('#sp-gestor-form')?.addEventListener('submit', onGestorCreateSubmit);
+  panel.querySelectorAll('.sp-gestor-card__link').forEach((link) => {
+    link.addEventListener('click', (event) => event.stopPropagation());
+  });
+  panel.querySelectorAll('[data-action="copy"]').forEach((button) => {
+    button.addEventListener('click', onGestorCopyCardAction);
+  });
+  panel.querySelectorAll('[data-action="fefrello"]').forEach((button) => {
+    button.addEventListener('click', onGestorCreateFefrelloAction);
+  });
+  panel.querySelectorAll('[data-action="toggle-card"]').forEach((button) => {
+    button.addEventListener('click', onGestorToggleCard);
+  });
+  panel.querySelectorAll('[data-action="save-card"]').forEach((button) => {
+    button.addEventListener('click', onGestorSaveCard);
+  });
+  panel.querySelectorAll('[data-action="cancel-edit"]').forEach((button) => {
+    button.addEventListener('click', onGestorCancelEdit);
+  });
+  panel.querySelectorAll('[data-action="email"]').forEach((button) => {
+    button.addEventListener('click', onGestorSendEmailAction);
+  });
+  panel.querySelectorAll('[data-action="archive"]').forEach((button) => {
+    button.addEventListener('click', onGestorToggleArchiveAction);
+  });
+  panel.querySelectorAll('[data-action="delete"]').forEach((button) => {
+    button.addEventListener('click', onGestorDelete);
+  });
+
+  if (gestorCurrentTab === 'ajustes') {
+    loadGestorFefrelloSettings(panel);
+  }
+}
+
+function createGestorPanel() {
+  const existingPanel = document.getElementById('sp-gestor-panel');
+  if (existingPanel) return existingPanel;
+
+  const panel = document.createElement('section');
+  panel.id = 'sp-gestor-panel';
+  panel.addEventListener('click', (event) => event.stopPropagation());
+  document.body.appendChild(panel);
+  renderGestorPanelContent(panel);
+  positionGestorPanel(panel);
+  return panel;
+}
+
+function loadGestorPanelPosition() {
+  return new Promise((resolve) => {
+    if (gestorPanelPositionLoaded) {
+      resolve();
+      return;
+    }
+    chrome.storage.local.get([GESTOR_PANEL_POSITION_KEY], (result) => {
+      gestorPanelSavedPos = result?.[GESTOR_PANEL_POSITION_KEY] || null;
+      gestorPanelPositionLoaded = true;
+      resolve();
+    });
+  });
+}
+
+function positionGestorPanel(panel) {
+  if (!panel) return;
+  const ww = window.innerWidth;
+  const wh = window.innerHeight;
+  panel.style.maxHeight = `${Math.max(320, wh - 88)}px`;
+
+  if (gestorPanelSavedPos && ww > 760) {
+    const safeLeft = Math.max(8, Math.min(gestorPanelSavedPos.left, ww - panel.offsetWidth - 8));
+    const safeTop = Math.max(8, Math.min(gestorPanelSavedPos.top, wh - panel.offsetHeight - 8));
+    panel.classList.add('is-positioned');
+    panel.style.left = `${safeLeft}px`;
+    panel.style.top = `${safeTop}px`;
+    panel.style.right = 'auto';
+    panel.style.bottom = 'auto';
+    return;
+  }
+
+  panel.classList.remove('is-positioned');
+  panel.style.top = '62px';
+  panel.style.left = '50%';
+  panel.style.right = 'auto';
+  panel.style.bottom = 'auto';
+}
+
+function makeGestorPanelDraggable(panel) {
+  const handle = panel?.querySelector('.sp-gestor-panel__header');
+  if (!panel || !handle || handle.dataset.dragBound === 'true') return;
+  handle.dataset.dragBound = 'true';
+
+  let isDragging = false;
+  let startX = 0;
+  let startY = 0;
+  let startLeft = 0;
+  let startTop = 0;
+
+  handle.addEventListener('mousedown', (event) => {
+    if (event.button !== 0 || event.target.closest('button, input, textarea, a')) return;
+    event.preventDefault();
+    const rect = panel.getBoundingClientRect();
+    isDragging = true;
+    panel.classList.add('is-positioned');
+    panel.style.left = `${rect.left}px`;
+    panel.style.top = `${rect.top}px`;
+    panel.style.right = 'auto';
+    panel.style.bottom = 'auto';
+    startX = event.clientX;
+    startY = event.clientY;
+    startLeft = rect.left;
+    startTop = rect.top;
+    handle.classList.add('is-dragging');
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+
+  function onMove(event) {
+    if (!isDragging) return;
+    const nextLeft = Math.max(8, Math.min(startLeft + (event.clientX - startX), window.innerWidth - panel.offsetWidth - 8));
+    const nextTop = Math.max(8, Math.min(startTop + (event.clientY - startY), window.innerHeight - panel.offsetHeight - 8));
+    panel.style.left = `${nextLeft}px`;
+    panel.style.top = `${nextTop}px`;
+  }
+
+  function onUp() {
+    if (!isDragging) return;
+    isDragging = false;
+    handle.classList.remove('is-dragging');
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    const rect = panel.getBoundingClientRect();
+    gestorPanelSavedPos = { top: rect.top, left: rect.left };
+    chrome.storage.local.set({ [GESTOR_PANEL_POSITION_KEY]: gestorPanelSavedPos });
+  }
+}
+
+async function openGestorPanel() {
+  await loadGestorPanelPosition();
+  const panel = createGestorPanel();
+  positionGestorPanel(panel);
+  panel.classList.add('visible');
+  document.getElementById('sp-btn-gestor')?.classList.add('sp-active');
+
+  if (hasAuthSession()) {
+    try {
+      await loadGestorLocalState();
+      renderGestorPanelContent(panel);
+      await loadGestorPendencias();
+      fillGestorForm(panel);
+    } catch (error) {
+      setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+    }
+  } else {
+    renderGestorPanelContent(panel);
+  }
+}
+
+function closeGestorPanel() {
+  document.getElementById('sp-gestor-panel')?.classList.remove('visible');
+  document.getElementById('sp-btn-gestor')?.classList.remove('sp-active');
+}
+
+function toggleGestorPanel() {
+  const panel = createGestorPanel();
+  if (panel.classList.contains('visible')) {
+    closeGestorPanel();
+  } else {
+    openGestorPanel();
+  }
+}
+
+function collectGestorCreateDraft(panel) {
+  const form = panel.querySelector('#sp-gestor-form') || panel;
+  return {
+    fields: {
+      login_cliente: panel.querySelector('#sp-gestor-login')?.value?.trim() || '',
+      numero_venda: panel.querySelector('#sp-gestor-venda')?.value?.trim() || '',
+      modelo: panel.querySelector('#sp-gestor-modelo')?.value?.trim() || '',
+      url: panel.querySelector('#sp-gestor-url')?.value?.trim() || '',
+      observacoes: panel.querySelector('#sp-gestor-obs')?.value?.trim() || '',
+      aro: buildGestorAroValue(collectGestorArosFromScope(form))
+    }
+  };
+}
+
+function resetGestorCreateForm(panel) {
+  panel.querySelector('#sp-gestor-form')?.reset();
+  const aroFields = panel.querySelector('#sp-gestor-aro-fields');
+  if (aroFields) aroFields.innerHTML = renderGestorAroFields([], 'form');
+  panel.querySelector('#sp-gestor-form')?.classList.add('sp-hidden');
+}
+
+async function submitGestorCreate({ sendToFefrello = false } = {}) {
+  const panel = createGestorPanel();
+  const { fields } = collectGestorCreateDraft(panel);
+  const login = fields.login_cliente;
+  const numeroVenda = fields.numero_venda;
+  const modelo = fields.modelo;
+  const observacoes = fields.observacoes;
+  const hasAroData = parseGestorAros(fields.aro).some((aro) => aro.value || aro.model);
+
+  if (!login && !numeroVenda && !modelo && !observacoes && !hasAroData) {
+    setGestorStatus('Preencha pelo menos um campo para salvar a pendência.', 'error');
+    return;
+  }
+
+  if (hasGestorDuplicateVenda(numeroVenda)) {
+    setGestorStatus(`Já existe uma pendência com a venda #${numeroVenda}.`, 'error');
+    return;
+  }
+
+  let fefrelloConfig = null;
+  if (sendToFefrello) {
+    fefrelloConfig = await loadGestorFefrelloConfig();
+    if (!fefrelloConfig?.boardId || !fefrelloConfig?.columnId) {
+      gestorCurrentTab = 'ajustes';
+      renderGestorPanelContent(createGestorPanel());
+      setGestorStatus('Configure o Fefrello em Ajustes.', 'error');
+      return;
+    }
+  }
+
+  const saveButton = panel.querySelector('#sp-gestor-save');
+  const fefrelloButton = panel.querySelector('#sp-gestor-save-fefrello');
+  if (saveButton) saveButton.disabled = true;
+  if (fefrelloButton) fefrelloButton.disabled = true;
+  setGestorStatus(sendToFefrello ? 'Criando card no Fefrello e salvando pendência...' : 'Salvando pendência...', 'info');
+
+  try {
+    if (sendToFefrello) {
+      const title = fields.login_cliente || fields.numero_venda || 'Sem titulo';
+      const description = formatGestorCardForFefrello(fields);
+      await createGestorFefrelloCard(
+        fefrelloConfig.boardId,
+        fefrelloConfig.columnId,
+        title,
+        description,
+        fefrelloConfig.responsible || ''
+      );
+    }
+
+    const created = await createGestorPendencia(fields);
+    if (sendToFefrello && created?.id) {
+      gestorFefrelloSentIds.add(String(created.id));
+      await saveGestorCardStatus();
+    }
+
+    gestorCurrentTab = 'pendencias';
+    resetGestorCreateForm(panel);
+    await loadGestorPendencias();
+    resetGestorCreateForm(createGestorPanel());
+    setGestorStatus(sendToFefrello ? 'Pendência salva e enviada ao Fefrello.' : 'Pendência criada com sucesso.', 'success');
+  } catch (error) {
+    setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    if (saveButton) saveButton.disabled = false;
+    if (fefrelloButton) fefrelloButton.disabled = false;
+  }
+}
+
+async function onGestorCreateSubmit(event) {
+  event.preventDefault();
+  await submitGestorCreate({ sendToFefrello: false });
+}
+
+async function onGestorCreateAndSendToFefrello(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  await submitGestorCreate({ sendToFefrello: true });
+}
+
+async function onGestorSaveEmailSettings() {
+  const panel = createGestorPanel();
+  const emailTo = panel.querySelector('#sp-gestor-email-to')?.value?.trim() || '';
+  const emailCC = panel.querySelector('#sp-gestor-email-cc')?.value?.trim() || '';
+  if (!emailTo) {
+    setGestorStatus('Informe o e-mail destinatário.', 'error');
+    return;
+  }
+  gestorEmailSettings = normalizeGestorEmailSettings({ emailTo, emailCC });
+  await saveGestorEmailSettings(gestorEmailSettings);
+  setGestorStatus('Ajustes de email salvos.', 'success');
+}
+
+async function loadGestorFefrelloColumnsIntoPanel(panel, boardId, selectedColumnId = '') {
+  const columnSelect = panel.querySelector('#sp-gestor-fefrello-column');
+  if (!columnSelect) return;
+  if (!boardId) {
+    columnSelect.innerHTML = '<option value="">Selecione um board</option>';
+    columnSelect.disabled = true;
+    return;
+  }
+  columnSelect.innerHTML = '<option value="">Carregando...</option>';
+  columnSelect.disabled = true;
+  try {
+    const columns = await loadGestorFefrelloColumns(boardId);
+    columnSelect.innerHTML = '<option value="">Selecione a coluna...</option>';
+    columns.forEach((column) => {
+      const option = document.createElement('option');
+      option.value = column.id;
+      option.textContent = column.title;
+      if (selectedColumnId && selectedColumnId === column.id) option.selected = true;
+      columnSelect.appendChild(option);
+    });
+    columnSelect.disabled = false;
+  } catch (error) {
+    columnSelect.innerHTML = '<option value="">Erro ao carregar</option>';
+    setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+  }
+}
+
+async function loadGestorFefrelloSettings(panel = createGestorPanel()) {
+  const boardSelect = panel.querySelector('#sp-gestor-fefrello-board');
+  const responsibleSelect = panel.querySelector('#sp-gestor-fefrello-responsible');
+  if (!boardSelect) return;
+
+  const saved = await loadGestorFefrelloConfig();
+  boardSelect.innerHTML = '<option value="">Carregando...</option>';
+  try {
+    const boards = await loadGestorFefrelloBoards();
+    boardSelect.innerHTML = '<option value="">Selecione o board...</option>';
+    boards.forEach((board) => {
+      const option = document.createElement('option');
+      option.value = board.id;
+      option.textContent = board.name;
+      if (saved?.boardId === board.id) option.selected = true;
+      boardSelect.appendChild(option);
+    });
+    if (saved?.responsible && responsibleSelect) {
+      responsibleSelect.value = saved.responsible;
+    }
+    await loadGestorFefrelloColumnsIntoPanel(panel, saved?.boardId || boardSelect.value, saved?.columnId || '');
+  } catch (error) {
+    boardSelect.innerHTML = '<option value="">Erro ao carregar</option>';
+    setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+  }
+
+  boardSelect.onchange = async () => {
+    await loadGestorFefrelloColumnsIntoPanel(panel, boardSelect.value);
+  };
+}
+
+async function onGestorSaveFefrelloSettings() {
+  const panel = createGestorPanel();
+  const boardId = panel.querySelector('#sp-gestor-fefrello-board')?.value || '';
+  const columnId = panel.querySelector('#sp-gestor-fefrello-column')?.value || '';
+  const responsible = panel.querySelector('#sp-gestor-fefrello-responsible')?.value || '';
+  await saveGestorFefrelloConfig({ boardId, columnId, responsible });
+  setGestorStatus('Configuração do Fefrello salva.', 'success');
+}
+
+async function onGestorRefreshFefrelloSettings(event) {
+  const button = event.currentTarget;
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Atualizando...';
+  }
+  try {
+    const boards = await loadGestorFefrelloBoards(true);
+    const columns = {};
+    for (const board of boards) {
+      columns[board.id] = await loadGestorFefrelloColumns(board.id, true);
+    }
+    await saveGestorFefrelloCache({ boards, columns });
+    await loadGestorFefrelloSettings();
+    setGestorStatus('Cache do Fefrello atualizado.', 'success');
+  } catch (error) {
+    setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Atualizar Fefrello';
+    }
+  }
+}
+
+function onGestorToggleCard(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const id = event.currentTarget?.dataset?.id;
+  if (!id) return;
+  gestorExpandedCardId = gestorExpandedCardId === String(id) ? null : String(id);
+  renderGestorPanelContent(createGestorPanel());
+}
+
+function onGestorCancelEdit(event) {
+  event.preventDefault();
+  const id = event.currentTarget?.dataset?.id;
+  if (!id) return;
+  gestorExpandedCardId = null;
+  renderGestorPanelContent(createGestorPanel());
+}
+
+async function onGestorSaveCard(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const id = event.currentTarget?.dataset?.id;
+  if (!id) return;
+  const card = event.currentTarget.closest('.sp-gestor-card');
+  if (!card) return;
+  const fields = collectGestorFields(card);
+  if (hasGestorDuplicateVenda(fields.numero_venda, id)) {
+    setGestorStatus(`Já existe uma pendência com a venda #${fields.numero_venda}.`, 'error');
+    return;
+  }
+
+  const button = event.currentTarget;
+  button.disabled = true;
+  button.textContent = 'Salvando...';
+  setGestorStatus('Atualizando pendência...', 'info');
+
+  try {
+    await updateGestorPendencia(id, fields);
+    const index = gestorPendencias.findIndex((item) => String(item.id) === String(id));
+    if (index !== -1) {
+      gestorPendencias[index] = {
+        ...gestorPendencias[index],
+        ...fields,
+        updated_at: new Date().toISOString()
+      };
+    }
+    gestorExpandedCardId = null;
+    renderGestorPanelContent(createGestorPanel());
+    setGestorStatus('Pendencia atualizada.', 'success');
+  } catch (error) {
+    setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+    button.disabled = false;
+    button.textContent = 'Salvar';
+  }
+}
+
+async function onGestorSendEmail(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const id = event.currentTarget?.dataset?.id;
+  if (!id) return;
+  const pendencia = getGestorPendenciaById(id);
+  if (!pendencia) {
+    setGestorStatus('Pendência não encontrada.', 'error');
+    return;
+  }
+  if (!normalizeGestorEmailSettings(gestorEmailSettings).emailTo) {
+    gestorCurrentTab = 'ajustes';
+    renderGestorPanelContent(createGestorPanel());
+    setGestorStatus('Defina o destinatário nos Ajustes antes de enviar.', 'error');
+    return;
+  }
+  setGestorStatus('Enviando email...', 'info');
+  try {
+    const date = new Date().toLocaleDateString('pt-BR');
+    const subject = `${pendencia.login_cliente || 'Cliente'} - Pendente - ${date}`;
+    const body = `
+      <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
+        <h2 style="color:#222;border-bottom:3px solid #FFE600;padding-bottom:8px;">
+          Pendência — ${escapeGestorValue(pendencia.login_cliente) || 'Cliente'}
+        </h2>
+        <p style="color:#666;margin-bottom:16px;">Data: <strong>${date}</strong></p>
+        ${gestorCardToEmailHtml(pendencia)}
+      </div>`;
+    await sendGestorEmail(subject, body);
+    gestorEmailSentIds.add(String(id));
+    await saveGestorCardStatus();
+    renderGestorPanelContent(createGestorPanel());
+    setGestorStatus('Email enviado com sucesso.', 'success');
+  } catch (error) {
+    setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+  }
+}
+
+async function onGestorSendConsolidated() {
+  const selected = getSelectedGestorBatchItems();
+  if (!selected.length) {
+    setGestorStatus('Nenhuma pendência selecionada.', 'error');
+    return;
+  }
+
+  const button = document.getElementById('sp-gestor-batch-consolidated');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Enviando...';
+  }
+
+  try {
+    const date = new Date().toLocaleDateString('pt-BR');
+    const subject = `Pendentes - ${date}`;
+    const body = `
+      <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
+        <h2 style="color:#222;border-bottom:3px solid #FFE600;padding-bottom:8px;">
+          Pendências em Aberto — ${date}
+        </h2>
+        <p style="color:#666;margin-bottom:16px;">Total: <strong>${selected.length}</strong> pendência(s)</p>
+        ${selected.map((item, index) =>
+          `${index > 0 ? '<hr style="border:none;border-top:1px solid #eee;margin:12px 0;" />' : ''}${gestorCardToEmailHtml(item)}`
+        ).join('')}
+      </div>`;
+    await sendGestorEmail(subject, body);
+    selected.forEach((item) => gestorEmailSentIds.add(String(item.id)));
+    await saveGestorCardStatus();
+    closeGestorBatchModal();
+    renderGestorPanelContent(createGestorPanel());
+    setGestorStatus(`Consolidado enviado — ${selected.length} pendência(s)!`, 'success');
+  } catch (error) {
+    setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Enviar consolidado';
+    }
+  }
+}
+
+async function onGestorSendIndividualAll() {
+  const selected = getSelectedGestorBatchItems();
+  if (!selected.length) {
+    setGestorStatus('Nenhuma pendência selecionada.', 'error');
+    return;
+  }
+
+  const button = document.getElementById('sp-gestor-batch-individual');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Enviando...';
+  }
+
+  let success = 0;
+  const errors = [];
+
+  for (const item of selected) {
+    try {
+      const date = new Date().toLocaleDateString('pt-BR');
+      const subject = `${item.login_cliente || 'Cliente'} - Pendente - ${date}`;
+      const body = `
+        <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
+          <h2 style="color:#222;border-bottom:3px solid #FFE600;padding-bottom:8px;">
+            Pendência — ${escapeGestorValue(item.login_cliente) || 'Cliente'}
+          </h2>
+          <p style="color:#666;margin-bottom:16px;">Data: <strong>${date}</strong></p>
+          ${gestorCardToEmailHtml(item)}
+        </div>`;
+      await sendGestorEmail(subject, body);
+      gestorEmailSentIds.add(String(item.id));
+      success += 1;
+    } catch (error) {
+      errors.push(`${item.login_cliente || 'Cliente'}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  await saveGestorCardStatus();
+  closeGestorBatchModal();
+  renderGestorPanelContent(createGestorPanel());
+  setGestorStatus(
+    errors.length ? `${success} enviados, ${errors.length} erro(s).` : `${success} email(s) enviado(s)!`,
+    errors.length ? 'error' : 'success'
+  );
+
+  if (button) {
+    button.disabled = false;
+    button.textContent = 'Enviar individual';
+  }
+}
+
+async function onGestorToggleArchive(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const id = event.currentTarget?.dataset?.id;
+  if (!id) return;
+  if (gestorArchivedIds.has(String(id))) {
+    gestorArchivedIds.delete(String(id));
+    gestorCurrentTab = 'pendencias';
+    if (gestorExpandedCardId === String(id)) gestorExpandedCardId = null;
+    await saveGestorCardStatus();
+    renderGestorPanelContent(createGestorPanel());
+    setGestorStatus('Pendência retornou para a tela principal.', 'success');
+    return;
+  }
+  gestorArchivedIds.add(String(id));
+  if (gestorExpandedCardId === String(id)) gestorExpandedCardId = null;
+  await saveGestorCardStatus();
+  syncGestorButton();
+  renderGestorPanelContent(createGestorPanel());
+  setGestorStatus('Pendência arquivada no histórico.', 'success');
+}
+
+async function onGestorDelete(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const id = event.currentTarget?.dataset?.id;
+  if (!id) return;
+  if (!confirm('Excluir esta pendência?')) return;
+
+  setGestorStatus('Excluindo pendência...', 'info');
+  try {
+    await deleteGestorPendencia(id);
+    gestorArchivedIds.delete(String(id));
+    gestorEmailSentIds.delete(String(id));
+    gestorCopiedIds.delete(String(id));
+    gestorFefrelloSentIds.delete(String(id));
+    if (gestorExpandedCardId === String(id)) gestorExpandedCardId = null;
+    await saveGestorCardStatus();
+    await loadGestorPendencias();
+    setGestorStatus('Pendencia excluida.', 'success');
+  } catch (error) {
+    setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+  }
+}
+
+async function onGestorSendEmailAction(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const id = event.currentTarget?.dataset?.id;
+  if (!id) return;
+  const pendencia = getGestorPendenciaById(id);
+  if (!pendencia) {
+    setGestorStatus('Pendência não encontrada.', 'error');
+    return;
+  }
+  if (!normalizeGestorEmailSettings(gestorEmailSettings).emailTo) {
+    gestorCurrentTab = 'ajustes';
+    renderGestorPanelContent(createGestorPanel());
+    setGestorStatus('Defina o destinatário nos Ajustes antes de enviar.', 'error');
+    return;
+  }
+  setGestorStatus('Enviando email...', 'info');
+  try {
+    const date = new Date().toLocaleDateString('pt-BR');
+    const subject = `${pendencia.login_cliente || 'Cliente'} - Pendente - ${date}`;
+    await sendGestorEmail(subject, buildGestorSingleEmailHtml(pendencia, date));
+    gestorEmailSentIds.add(String(id));
+    await saveGestorCardStatus();
+    renderGestorPanelContent(createGestorPanel());
+    setGestorStatus('Email enviado com sucesso.', 'success');
+  } catch (error) {
+    setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+  }
+}
+
+async function onGestorCopyCardAction(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const id = event.currentTarget?.dataset?.id;
+  if (!id) return;
+  const pendencia = getGestorPendenciaById(id);
+  if (!pendencia) {
+    setGestorStatus('Pendência não encontrada.', 'error');
+    return;
+  }
+  try {
+    await copyGestorHtml(buildGestorSingleEmailHtml(pendencia));
+    gestorCopiedIds.add(String(id));
+    await saveGestorCardStatus();
+    renderGestorPanelContent(createGestorPanel());
+    setGestorStatus('Dados do cartão copiados.', 'success');
+  } catch (error) {
+    setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+  }
+}
+
+async function onGestorCopySelectedAction() {
+  const selected = getSelectedGestorBatchItems();
+  if (!selected.length) {
+    setGestorStatus('Nenhuma pendência selecionada.', 'error');
+    return;
+  }
+
+  const button = document.getElementById('sp-gestor-batch-copy');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Copiando...';
+  }
+
+  try {
+    const html = selected.length === 1
+      ? buildGestorSingleEmailHtml(selected[0])
+      : buildGestorConsolidatedEmailHtml(selected);
+    await copyGestorHtml(html);
+    selected.forEach((item) => gestorCopiedIds.add(String(item.id)));
+    await saveGestorCardStatus();
+    closeGestorBatchModal();
+    renderGestorPanelContent(createGestorPanel());
+    setGestorStatus(`${selected.length} pendência(s) copiada(s).`, 'success');
+  } catch (error) {
+    setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Copiar selecionados';
+    }
+  }
+}
+
+async function onGestorCreateFefrelloAction(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const button = event?.currentTarget || event?.target?.closest?.('[data-action="fefrello"]');
+  const id = button?.dataset?.id;
+  if (!id) return;
+  const pendencia = getGestorPendenciaById(id);
+  if (!pendencia) return;
+
+  const config = await loadGestorFefrelloConfig();
+  if (!config?.boardId || !config?.columnId) {
+    gestorCurrentTab = 'ajustes';
+    renderGestorPanelContent(createGestorPanel());
+    setGestorStatus('Configure o Fefrello em Ajustes.', 'error');
+    return;
+  }
+
+  const previousLabel = button?.textContent || 'Fefrello';
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Criando...';
+  }
+
+  try {
+    const title = pendencia.login_cliente || pendencia.numero_venda || 'Sem titulo';
+    const description = formatGestorCardForFefrello(pendencia);
+    await createGestorFefrelloCard(config.boardId, config.columnId, title, description, config.responsible || '');
+    gestorFefrelloSentIds.add(String(id));
+    await saveGestorCardStatus();
+    renderGestorPanelContent(createGestorPanel());
+    setGestorStatus('Card Fefrello criado.', 'success');
+  } catch (error) {
+    if (button) {
+      button.disabled = false;
+      button.textContent = previousLabel;
+    }
+    setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+  }
+}
+
+async function onGestorSendConsolidatedAction() {
+  const selected = getSelectedGestorBatchItems();
+  if (!selected.length) {
+    setGestorStatus('Nenhuma pendencia selecionada.', 'error');
+    return;
+  }
+
+  const button = document.getElementById('sp-gestor-batch-consolidated');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Enviando...';
+  }
+
+  try {
+    const date = new Date().toLocaleDateString('pt-BR');
+    const subject = `Pendentes - ${date}`;
+    await sendGestorEmail(subject, buildGestorConsolidatedEmailHtml(selected, date));
+    selected.forEach((item) => gestorEmailSentIds.add(String(item.id)));
+    await saveGestorCardStatus();
+    closeGestorBatchModal();
+    renderGestorPanelContent(createGestorPanel());
+    setGestorStatus(`Consolidado enviado - ${selected.length} pendência(s)!`, 'success');
+  } catch (error) {
+    setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Enviar consolidado';
+    }
+  }
+}
+
+async function onGestorSendIndividualAllAction() {
+  const selected = getSelectedGestorBatchItems();
+  if (!selected.length) {
+    setGestorStatus('Nenhuma pendência selecionada.', 'error');
+    return;
+  }
+
+  const button = document.getElementById('sp-gestor-batch-individual');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Enviando...';
+  }
+
+  let success = 0;
+  const errors = [];
+
+  for (const item of selected) {
+    try {
+      const date = new Date().toLocaleDateString('pt-BR');
+      const subject = `${item.login_cliente || 'Cliente'} - Pendente - ${date}`;
+      await sendGestorEmail(subject, buildGestorSingleEmailHtml(item, date));
+      gestorEmailSentIds.add(String(item.id));
+      success += 1;
+    } catch (error) {
+      errors.push(`${item.login_cliente || 'Cliente'}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  await saveGestorCardStatus();
+  closeGestorBatchModal();
+  renderGestorPanelContent(createGestorPanel());
+  setGestorStatus(
+    errors.length ? `${success} enviados, ${errors.length} erro(s).` : `${success} email(s) enviado(s)!`,
+    errors.length ? 'error' : 'success'
+  );
+
+  if (button) {
+    button.disabled = false;
+    button.textContent = 'Enviar individual';
+  }
+}
+
+async function onGestorToggleArchiveAction(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  const id = event.currentTarget?.dataset?.id;
+  if (!id) return;
+  if (gestorArchivedIds.has(String(id))) {
+    gestorArchivedIds.delete(String(id));
+    if (gestorExpandedCardId === String(id)) gestorExpandedCardId = null;
+    await saveGestorCardStatus();
+    syncGestorButton();
+    renderGestorPanelContent(createGestorPanel());
+    setGestorStatus('Pendência retornou para a lista principal.', 'success');
+    return;
+  }
+  gestorArchivedIds.add(String(id));
+  if (gestorExpandedCardId === String(id)) gestorExpandedCardId = null;
+  await saveGestorCardStatus();
+  syncGestorButton();
+  renderGestorPanelContent(createGestorPanel());
+  setGestorStatus('Pendência arquivada.', 'success');
+}
+
+async function onGestorClearArchivedAction() {
+  const historico = gestorPendencias.filter((item) => gestorArchivedIds.has(String(item.id)));
+  if (!historico.length) {
+    setGestorStatus('Não há pendências arquivadas para limpar.', 'error');
+    return;
+  }
+  if (!confirm(`Excluir ${historico.length} pendência(s) arquivada(s)? Esta ação não pode ser desfeita.`)) return;
+
+  const button = document.getElementById('sp-gestor-clear-history');
+  if (button) {
+    button.disabled = true;
+    button.textContent = 'Limpando...';
+  }
+
+  setGestorStatus('Limpando historico...', 'info');
+  try {
+    for (const pendencia of historico) {
+      await deleteGestorPendencia(pendencia.id);
+      gestorArchivedIds.delete(String(pendencia.id));
+      gestorEmailSentIds.delete(String(pendencia.id));
+      gestorCopiedIds.delete(String(pendencia.id));
+      gestorFefrelloSentIds.delete(String(pendencia.id));
+    }
+    gestorPendencias = gestorPendencias.filter((item) => !historico.some((archived) => String(archived.id) === String(item.id)));
+    if (gestorExpandedCardId && !getGestorPendenciaById(gestorExpandedCardId)) gestorExpandedCardId = null;
+    await saveGestorCardStatus();
+    renderGestorPanelContent(createGestorPanel());
+    syncGestorButton();
+    setGestorStatus('Histórico arquivado limpo com sucesso.', 'success');
+  } catch (error) {
+    setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = 'Limpar arquivados';
+    }
+  }
+}
+
+function isOrderPickerSupportedPage() {
+  const isMercadoLivre =
+    window.location.hostname.includes('mercadolivre.com.br') ||
+    window.location.hostname.includes('mercadolibre.com');
+
+  return isMercadoLivre && /^\/vendas(\/|$)/.test(window.location.pathname);
+}
+
+function getOrderRowsForPicker() {
+  return Array.from(document.querySelectorAll('.sc-row, .sc-row-marketplace'))
+    .filter((row) => row.querySelector('.left-column__pack-id[aria-label^="#"]'));
+}
+
+function getOrderIdFromPickerRow(row) {
+  const packNode = row.querySelector('.left-column__pack-id[aria-label^="#"]');
+  const rawValue = packNode?.getAttribute('aria-label') || packNode?.textContent || '';
+  return rawValue.replace('#', '').trim();
+}
+
+function getOrderCheckbox(row) {
+  return row.querySelector('input[data-testid="row-checkbox"][type="checkbox"]');
+}
+
+function getOrderDetailUrl(orderId) {
+  const callbackUrl = encodeURIComponent(window.location.href);
+  return `${window.location.origin}/vendas/${orderId}/detalhe?callbackUrl=${callbackUrl}`;
+}
+
+function selectOrderCheckbox(checkbox) {
+  if (!checkbox || checkbox.disabled || checkbox.checked) {
+    return checkbox?.checked === true;
+  }
+
+  const clickableTarget =
+    checkbox.closest('.andes-checkbox__checkbox') ||
+    checkbox.parentElement ||
+    checkbox;
+
+  clickableTarget.click();
+  if (!checkbox.checked) checkbox.click();
+
+  return checkbox.checked;
+}
+
+function collectOrdersFromBottom(quantity) {
+  const rows = getOrderRowsForPicker();
+  const selectedOrders = [];
+  const skippedOrders = [];
+
+  for (let index = rows.length - 1; index >= 0; index -= 1) {
+    if (selectedOrders.length >= quantity) break;
+
+    const row = rows[index];
+    const orderId = getOrderIdFromPickerRow(row);
+    const checkbox = getOrderCheckbox(row);
+
+    if (!orderId || !checkbox || checkbox.disabled) {
+      skippedOrders.push(orderId || `linha-${index + 1}`);
+      continue;
+    }
+
+    const wasSelected = selectOrderCheckbox(checkbox);
+    if (!wasSelected) {
+      skippedOrders.push(orderId);
+      continue;
+    }
+
+    selectedOrders.push({
+      orderId,
+      url: getOrderDetailUrl(orderId)
+    });
+  }
+
+  return {
+    totalRows: rows.length,
+    selectedOrders,
+    skippedOrders
+  };
+}
+
+function setOrderPickerStatus(message, tone = 'info') {
+  const status = document.getElementById('sp-order-status');
+  if (!status) return;
+  status.textContent = message;
+  status.dataset.tone = tone;
+}
+
+async function loadOrderPickerQuantity(input) {
+  try {
+    const stored = await chrome.storage.local.get(PEGADOR_STORAGE_KEY);
+    const quantity = Number(stored?.[PEGADOR_STORAGE_KEY]);
+    if (Number.isInteger(quantity) && quantity > 0) {
+      input.value = String(quantity);
+    }
+  } catch (_) {}
+
+  input.dataset.autoClear = input.value ? 'true' : 'false';
+}
+
+function createOrderPickerPanel() {
+  const existingPanel = document.getElementById('sp-order-panel');
+  if (existingPanel) return existingPanel;
+
+  const panel = document.createElement('section');
+  panel.id = 'sp-order-panel';
+  panel.innerHTML = `
+    <div class="sp-order-panel__header">
+      <strong>Pegador de Pedidos</strong>
+      <button type="button" id="sp-order-close" class="sp-order-close" aria-label="Fechar">x</button>
+    </div>
+    <label class="sp-order-field">
+      <span>Quantidade de pedidos</span>
+      <input id="sp-order-quantity" type="number" min="1" step="1" value="1" />
+    </label>
+    <button type="button" id="sp-order-run" class="sp-order-run">Selecionar e abrir</button>
+    <p id="sp-order-status" class="sp-order-status" data-tone="info"></p>
+  `;
+
+  document.body.appendChild(panel);
+
+  const quantityInput = panel.querySelector('#sp-order-quantity');
+  const runButton = panel.querySelector('#sp-order-run');
+  const closeButton = panel.querySelector('#sp-order-close');
+
+  loadOrderPickerQuantity(quantityInput);
+  runButton.addEventListener('click', runOrderPicker);
+  quantityInput.addEventListener('keydown', (event) => {
+    if (/^\d$/.test(event.key) && quantityInput.dataset.autoClear !== 'false') {
+      quantityInput.value = '';
+      quantityInput.dataset.autoClear = 'false';
+    }
+
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      runOrderPicker();
+    }
+  });
+  quantityInput.addEventListener('input', () => {
+    if (quantityInput.dataset.autoClear !== 'false' && quantityInput.value === '') {
+      quantityInput.dataset.autoClear = 'false';
+    }
+  });
+  closeButton.addEventListener('click', closeOrderPickerPanel);
+
+  return panel;
+}
+
+function openOrderPickerPanel() {
+  const panel = createOrderPickerPanel();
+  panel.classList.add('visible');
+  document.getElementById('sp-btn-orders')?.classList.add('sp-active');
+
+  if (!isOrderPickerSupportedPage()) {
+    setOrderPickerStatus('Abra a tela de Vendas do Mercado Livre para usar este modulo.', 'error');
+    return;
+  }
+
+  setOrderPickerStatus('Defina a quantidade e execute a coleta.', 'info');
+  const quantityInput = panel.querySelector('#sp-order-quantity');
+  if (quantityInput) {
+    quantityInput.dataset.autoClear = quantityInput.value ? 'true' : 'false';
+    quantityInput.focus();
+    quantityInput.select();
+  }
+}
+
+function closeOrderPickerPanel() {
+  document.getElementById('sp-order-panel')?.classList.remove('visible');
+  document.getElementById('sp-btn-orders')?.classList.remove('sp-active');
+}
+
+function toggleOrderPickerPanel() {
+  const panel = createOrderPickerPanel();
+  if (panel.classList.contains('visible')) {
+    closeOrderPickerPanel();
+  } else {
+    openOrderPickerPanel();
+  }
+}
+
+async function runOrderPicker() {
+  const panel = createOrderPickerPanel();
+  const quantityInput = panel.querySelector('#sp-order-quantity');
+  const runButton = panel.querySelector('#sp-order-run');
+  const requestedQuantity = Number(quantityInput?.value);
+
+  if (!isOrderPickerSupportedPage()) {
+    setOrderPickerStatus('Abra a tela de Vendas do Mercado Livre para usar este modulo.', 'error');
+    return;
+  }
+
+  if (!Number.isInteger(requestedQuantity) || requestedQuantity <= 0) {
+    setOrderPickerStatus('Informe uma quantidade inteira maior que zero.', 'error');
+    quantityInput?.focus();
+    return;
+  }
+
+  runButton.disabled = true;
+  setOrderPickerStatus('Processando pedidos...', 'info');
+
+  try {
+    await chrome.storage.local.set({ [PEGADOR_STORAGE_KEY]: requestedQuantity });
+
+    const result = collectOrdersFromBottom(requestedQuantity);
+    if (result.totalRows === 0) {
+      throw new Error('Nenhuma linha de pedido foi encontrada nesta pagina.');
+    }
+    if (result.selectedOrders.length === 0) {
+      throw new Error('Nenhum pedido visivel pode ser selecionado no momento.');
+    }
+
+    const openResult = await chrome.runtime.sendMessage({
+      type: 'OPEN_ORDER_TABS',
+      urls: result.selectedOrders.map((order) => order.url)
+    });
+
+    if (!openResult?.ok) {
+      throw new Error(openResult?.error || 'Falha ao abrir os pedidos.');
+    }
+
+    const processedOrders = result.selectedOrders.map((order) => order.orderId).join(', ');
+    setOrderPickerStatus(
+      `Selecionados: ${result.selectedOrders.length}\n` +
+      `Abas abertas: ${openResult.opened || 0}\n` +
+      `Pedidos: ${processedOrders || '-'}`,
+      'success'
+    );
+
+    mostrarNotificacao(`${openResult.opened || 0} pedido${openResult.opened === 1 ? '' : 's'} aberto${openResult.opened === 1 ? '' : 's'}!`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    setOrderPickerStatus(message, 'error');
+    mostrarNotificacao(message, 'error');
+  } finally {
+    runButton.disabled = false;
+  }
+}
 
 let isMonitoring = true;
 let observer = null;
@@ -517,6 +3339,10 @@ let buttonPosition = { bottom: '20px', right: '20px', top: 'auto', left: 'auto' 
 let activeCategory = null;
 let searchQuery    = '';
 let isDarkTheme    = false;
+let passoLargoRemoteLoaded = false;
+let passoLargoSyncTimer = null;
+let passoLargoSyncInFlight = false;
+let passoLargoLastSyncedSignature = '';
 let panelSavedPos  = null;  // posição gravada do overlay arrastar
 
 const AVAILABLE_VARS = [
@@ -528,13 +3354,113 @@ const categoryIcons = {
   'Troca de Endereço': '🏠', 'Troca de Aliança': '💍', 'Menos Usadas': '❓', default: '📂',
 };
 
+const PASSO_LARGO_TABLE = 'passo_largo_user_data';
+
+function normalizePassoLargoData(data) {
+  if (!data || typeof data !== 'object' || typeof data.categories !== 'object' || !data.categories) {
+    return { categories: {} };
+  }
+  return data;
+}
+
+function getMessageDataSignature() {
+  try {
+    return JSON.stringify(messageData);
+  } catch (_) {
+    return '';
+  }
+}
+
 function loadData() {
-  try { const s = localStorage.getItem('mr-messages');        if (s) messageData    = JSON.parse(s); } catch(e) {}
+  try {
+    const s = localStorage.getItem('mr-messages');
+    if (s) messageData = normalizePassoLargoData(JSON.parse(s));
+  } catch(e) {}
   try { const p = localStorage.getItem('mr-button-position'); if (p) buttonPosition = JSON.parse(p); } catch(e) {}
   try { const t = localStorage.getItem('mr-theme');           if (t) isDarkTheme    = t === 'dark';  } catch(e) {}
   chrome.storage.local.get(['sp_panel_pos'], (r) => { if (r.sp_panel_pos) panelSavedPos = r.sp_panel_pos; });
 }
-function saveData() { localStorage.setItem('mr-messages', JSON.stringify(messageData)); }
+
+async function loadPassoLargoRemoteData() {
+  if (!hasAuthSession()) {
+    passoLargoRemoteLoaded = false;
+    return false;
+  }
+
+  const rows = await sbFetch(`/rest/v1/${PASSO_LARGO_TABLE}?user_id=eq.${auth.user.id}&select=payload`);
+  const payload = rows?.[0]?.payload;
+
+  if (!payload || typeof payload !== 'object') {
+    passoLargoRemoteLoaded = true;
+    passoLargoLastSyncedSignature = '';
+    return false;
+  }
+
+  messageData = normalizePassoLargoData(payload);
+  localStorage.setItem('mr-messages', JSON.stringify(messageData));
+  passoLargoRemoteLoaded = true;
+  passoLargoLastSyncedSignature = getMessageDataSignature();
+  return true;
+}
+
+async function upsertPassoLargoRemoteData() {
+  if (!hasAuthSession()) return;
+
+  const signature = getMessageDataSignature();
+  if (!signature || signature === passoLargoLastSyncedSignature) return;
+
+  await sbFetch(`/rest/v1/${PASSO_LARGO_TABLE}`, {
+    method: 'POST',
+    headers: {
+      Prefer: 'resolution=merge-duplicates,return=representation'
+    },
+    body: JSON.stringify({
+      user_id: auth.user.id,
+      payload: messageData,
+      updated_at: new Date().toISOString()
+    })
+  });
+
+  passoLargoRemoteLoaded = true;
+  passoLargoLastSyncedSignature = signature;
+}
+
+function schedulePassoLargoSync() {
+  if (!hasAuthSession()) return;
+  if (passoLargoSyncTimer) clearTimeout(passoLargoSyncTimer);
+
+  passoLargoSyncTimer = setTimeout(async () => {
+    if (passoLargoSyncInFlight) return;
+    passoLargoSyncInFlight = true;
+    try {
+      await upsertPassoLargoRemoteData();
+    } catch (error) {
+      console.warn('[Sentinela Pro] Falha ao sincronizar Passo Largo:', error instanceof Error ? error.message : error);
+    } finally {
+      passoLargoSyncInFlight = false;
+      passoLargoSyncTimer = null;
+    }
+  }, 400);
+}
+
+async function initializePassoLargoForSession() {
+  if (!hasAuthSession()) {
+    passoLargoRemoteLoaded = false;
+    return;
+  }
+
+  const loadedRemote = await loadPassoLargoRemoteData();
+  if (loadedRemote) return;
+
+  if (Object.keys(messageData.categories).length > 0) {
+    await upsertPassoLargoRemoteData();
+  }
+}
+
+function saveData() {
+  localStorage.setItem('mr-messages', JSON.stringify(messageData));
+  schedulePassoLargoSync();
+}
 function saveButtonPosition(top, left) {
   const ww = window.innerWidth, wh = window.innerHeight, dr = ww - left, db = wh - top;
   buttonPosition = { right: dr < ww/2 ? dr+'px' : 'auto', left: dr < ww/2 ? 'auto' : left+'px', bottom: db < wh/2 ? db+'px' : 'auto', top: db < wh/2 ? 'auto' : top+'px' };
@@ -543,8 +3469,9 @@ function saveButtonPosition(top, left) {
 
 function formatCustomerName(name) {
   if (!name) return name;
-  if (name === name.toUpperCase()) return name.charAt(0).toUpperCase() + name.slice(1).toLowerCase();
-  return name;
+  const normalized = String(name).trim().toLowerCase();
+  if (!normalized) return '';
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
 }
 function getFirstNameFromPage() {
   let n = '';
@@ -577,7 +3504,7 @@ function insertMessage(message) {
     if (campo.tagName === 'TEXTAREA' || campo.tagName === 'INPUT') {
       campo.value = final; campo.dispatchEvent(new Event('input', { bubbles: true })); campo.dispatchEvent(new Event('change', { bubbles: true }));
     } else { campo.textContent = final; campo.dispatchEvent(new Event('input', { bubbles: true })); }
-    showToast('Mensagem inserida! ✓');
+    
   } else { navigator.clipboard.writeText(final).then(() => showToast('Copiado!')).catch(() => showToast('Não foi possível inserir.')); }
   hidePanel();
 }
@@ -614,28 +3541,8 @@ function nlpTfIdf(query, docs) {
     return (magQ && magD) ? dot/(magQ*magD) : 0;
   });
 }
-let suggestionState = { catName: null, subName: null, score: 0 };
 let suggestionObserver = null;
-const SUGGESTION_THRESHOLD = 0.05, FEEDBACK_KEY = 'mr-suggestion-feedback', FEEDBACK_BONUS = 0.35, FEEDBACK_DECAY = 0.92, MAX_FEEDBACK_ENTRIES = 200;
-function loadFeedback() { try { return JSON.parse(localStorage.getItem(FEEDBACK_KEY)||'{}'); } catch(e) { return {}; } }
-function saveFeedback(fb) { try { localStorage.setItem(FEEDBACK_KEY, JSON.stringify(fb)); } catch(e) {} }
-function contextKey(text) { return nlpTokenize(text).slice(-6).join('_').substring(0,80); }
-function recordFeedback(catName, subName) {
-  if (!suggestionState.score) return;
-  const clientText = getLastClientMessages(3); if (!clientText) return;
-  const key = contextKey(clientText); if (!key) return;
-  const fb = loadFeedback(); if (!fb[key]) fb[key] = {};
-  const chosenId = catName+'::'+subName; fb[key][chosenId] = (fb[key][chosenId]||0)+1;
-  Object.keys(fb[key]).forEach(id => { if (id!==chosenId) fb[key][id]=(fb[key][id]||0)*FEEDBACK_DECAY; });
-  if (Object.keys(fb).length > MAX_FEEDBACK_ENTRIES) delete fb[Object.keys(fb)[0]];
-  saveFeedback(fb);
-}
-function feedbackBonus(clientText, catName, subName) {
-  const key = contextKey(clientText); if (!key) return 0;
-  const fb = loadFeedback(); if (!fb[key]) return 0;
-  const uses = fb[key][catName+'::'+subName]||0;
-  return uses > 0 ? FEEDBACK_BONUS*Math.log1p(uses) : 0;
-}
+function recordFeedback() {}
 function getLastClientMessages(n=3) {
   const container = document.querySelector('.messages-container') || document.querySelector('[data-testid="messages-container"]') || document.querySelector('.andes-message-card__body') || document.querySelector('.conversation-thread') || document.querySelector('.chat-container');
   if (!container) return '';
@@ -646,24 +3553,10 @@ function getLastClientMessages(n=3) {
   if (!msgs.length) { const all = container.querySelectorAll('[class*="message"] [class*="text"],[class*="bubble"],[class*="message-content"]'); msgs = Array.from(all).map(el=>el.textContent.trim()).filter(t=>t.length>3&&t.length<500); }
   return msgs.slice(-n).join(' ');
 }
-function runSuggestion() {
-  const clientText = getLastClientMessages(3); if (!clientText||clientText.length<5) return;
-  const allMsgs = [];
-  Object.entries(messageData.categories).forEach(([catName,cat]) => { Object.entries(cat.subcategories||{}).forEach(([subName,subItem]) => { allMsgs.push({catName,subName,message:typeof subItem==='string'?subItem:subItem.message}); }); });
-  if (!allMsgs.length) return;
-  const rawScores = nlpTfIdf(clientText, allMsgs);
-  const scores = rawScores.map((s,i)=>s+feedbackBonus(clientText,allMsgs[i].catName,allMsgs[i].subName));
-  const best = scores.reduce((bi,s,i)=>s>scores[bi]?i:bi,0), bestScore = scores[best];
-  if (bestScore >= SUGGESTION_THRESHOLD) { const prev = suggestionState; suggestionState = {...allMsgs[best],score:bestScore}; if (prev.subName!==suggestionState.subName||prev.catName!==suggestionState.catName) renderCards(); }
-  else if (suggestionState.subName) { suggestionState = {catName:null,subName:null,score:0}; renderCards(); }
-}
+function runSuggestion() {}
 function startSuggestionObserver() {
   if (suggestionObserver) suggestionObserver.disconnect();
-  const target = document.querySelector('.messages-container')||document.querySelector('[data-testid="messages-container"]')||document.querySelector('.conversation-thread')||document.body;
-  let debounceTimer = null;
-  suggestionObserver = new MutationObserver(() => { clearTimeout(debounceTimer); debounceTimer = setTimeout(runSuggestion, 800); });
-  suggestionObserver.observe(target, {childList:true,subtree:true});
-  setTimeout(runSuggestion, 300);
+  suggestionObserver = null;
 }
 
 // ── Panel UI ──────────────────────────────────────────────────
@@ -794,12 +3687,12 @@ function renderCards() {
   const msgs = getAllMessages();
   if (!msgs.length) { content.innerHTML = `<div class="mr-empty"><div class="mr-ei">💬</div><div class="mr-et">${searchQuery?'Nenhum resultado':'Nenhuma mensagem'}</div><div class="mr-ed">${searchQuery?'Tente outro termo.':'Clique em "+ Nova Mensagem" para começar.'}</div></div>`; return; }
   msgs.forEach(({ catName, subName, message, color }) => {
-    const card = document.createElement('div'), isSuggested = suggestionState.subName===subName&&suggestionState.catName===catName;
-    card.className = 'mr-card'+(isSuggested?' mr-suggested':'');
-    card.innerHTML = `<div class="mr-ci">${isSuggested?'<div class="mr-suggest-badge">✨ Sugerida</div>':''}<div class="mr-cbar" style="background:${color}"></div><div class="mr-cbody"><span class="mr-cname">${subName}</span><div class="mr-cprev">${highlightVars(message)}</div><div class="mr-cft"><div class="mr-cact"><button class="mr-btn mr-bg mr-edit">Editar</button><button class="mr-btn mr-bp mr-use">Usar</button></div></div></div></div>`;
-    card.querySelector('.mr-use').onclick  = e => { e.stopPropagation(); recordFeedback(catName,subName); insertMessage(message); };
+    const card = document.createElement('div');
+    card.className = 'mr-card';
+    card.innerHTML = `<div class="mr-ci"><div class="mr-cbar" style="background:${color}"></div><div class="mr-cbody"><span class="mr-cname">${subName}</span><div class="mr-cprev">${highlightVars(message)}</div><div class="mr-cft"><div class="mr-cact"><button class="mr-btn mr-bg mr-edit">Editar</button><button class="mr-btn mr-bp mr-use">Usar</button></div></div></div></div>`;
+    card.querySelector('.mr-use').onclick  = e => { e.stopPropagation(); insertMessage(message); };
     card.querySelector('.mr-edit').onclick = e => { e.stopPropagation(); openMessageModal(catName,subName); };
-    card.onclick = () => { recordFeedback(catName,subName); insertMessage(message); };
+    card.onclick = () => { insertMessage(message); };
     content.appendChild(card);
   });
 }
@@ -866,7 +3759,7 @@ function openImportExportModal() {
   modal.querySelector('.mr-mc').onclick=()=>closeOverlay(ov); modal.querySelector('#ie-close').onclick=()=>closeOverlay(ov);
   modal.querySelector('#exp-btn').onclick=()=>{const a=document.createElement('a');a.href='data:application/json;charset=utf-8,'+encodeURIComponent(JSON.stringify(messageData,null,2));a.download='backup-mensagens.json';a.click();};
   modal.querySelector('#imp-btn').onclick=()=>modal.querySelector('#mr-file').click();
-  modal.querySelector('#mr-file').onchange=e=>{const file=e.target.files[0];if(!file)return;const reader=new FileReader();reader.onload=ev=>{try{const data=JSON.parse(ev.target.result);if(!data.categories)throw new Error('Formato inválido');if(confirm('Substituir mensagens atuais?')){messageData=data;saveData();refreshPanel();closeOverlay(ov);showToast('Importado com sucesso!');}}catch(err){alert('Erro: '+err.message);}};reader.readAsText(file);e.target.value='';};
+  modal.querySelector('#mr-file').onchange=e=>{const file=e.target.files[0];if(!file)return;const reader=new FileReader();reader.onload=ev=>{try{const data=JSON.parse(ev.target.result);if(!data.categories)throw new Error('Formato inválido');if(confirm('Substituir mensagens atuais?')){messageData=normalizePassoLargoData(data);saveData();refreshPanel();closeOverlay(ov);showToast('Importado com sucesso!');}}catch(err){alert('Erro: '+err.message);}};reader.readAsText(file);e.target.value='';};
 }
 
 function openSettingsPanel() {
@@ -945,14 +3838,28 @@ const BACKUP_URL  = 'https://raw.githubusercontent.com/ASolha/passo-largo/main/b
 const IMPORT_FLAG = 'mr-auto-imported';
 
 async function bootstrap() {
+  await restoreAuthSession();
   loadData();
+  try {
+    await initializePassoLargoForSession();
+  } catch (error) {
+    console.warn('[Sentinela Pro] Falha ao iniciar o Passo Largo remoto:', error instanceof Error ? error.message : error);
+  }
+  try {
+    await loadGestorLocalState();
+    if (hasAuthSession()) {
+      await loadGestorPendencias();
+    }
+  } catch (error) {
+    console.warn('[Sentinela Pro] Falha ao iniciar o Gestor:', error instanceof Error ? error.message : error);
+  }
   const alreadyImported = localStorage.getItem(IMPORT_FLAG), hasData = Object.keys(messageData.categories).length > 0;
   if (!alreadyImported && !hasData) {
     try {
       const res = await fetch(BACKUP_URL); if (!res.ok) throw new Error('HTTP ' + res.status);
       const imported = await res.json();
       if (imported && imported.categories && Object.keys(imported.categories).length > 0) {
-        messageData = imported; saveData(); localStorage.setItem(IMPORT_FLAG, '1');
+        messageData = normalizePassoLargoData(imported); saveData(); localStorage.setItem(IMPORT_FLAG, '1');
         console.log('[Sentinela Pro] Backup Passo Largo importado!');
       }
     } catch(e) { console.warn('[Sentinela Pro] Não foi possível importar backup:', e.message); }
@@ -966,11 +3873,59 @@ async function bootstrap() {
 function init() { bootstrap(); }
 if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', init); } else { init(); }
 
+document.addEventListener('sp:auth-changed', async () => {
+  try {
+    if (hasAuthSession()) {
+      await initializePassoLargoForSession();
+      await loadGestorLocalState();
+      await loadGestorPendencias();
+      if (document.getElementById('mr-panel')) {
+        refreshPanel();
+      }
+    } else {
+      passoLargoRemoteLoaded = false;
+      passoLargoLastSyncedSignature = '';
+      gestorPendencias = [];
+      gestorLoading = false;
+      gestorCurrentTab = 'pendencias';
+      gestorEmailSettings = normalizeGestorEmailSettings(null);
+      gestorEmailSentIds = new Set();
+      gestorCopiedIds = new Set();
+      gestorArchivedIds = new Set();
+      gestorFefrelloSentIds = new Set();
+      syncGestorButton();
+      renderGestorPanelContent(document.getElementById('sp-gestor-panel'));
+    }
+  } catch (error) {
+    console.warn('[Sentinela Pro] Falha ao atualizar dados do Passo Largo apos login:', error instanceof Error ? error.message : error);
+    if (error instanceof Error) {
+      mostrarNotificacao(error.message, 'error');
+    }
+  }
+});
+
 document.addEventListener('click', e => {
   const panel = document.getElementById('mr-panel');
+  const orderPanel = document.getElementById('sp-order-panel');
+  const gestorPanel = document.getElementById('sp-gestor-panel');
+  const gestorBatchOverlay = document.getElementById('sp-gestor-batch-overlay');
+  const authPanel = document.getElementById('sp-auth-panel');
+  const bar = document.getElementById('sp-topbar');
+
+  if (gestorPanel?.classList.contains('visible') && !gestorPanel.contains(e.target) && !gestorBatchOverlay?.contains(e.target) && !bar?.contains(e.target)) {
+    closeGestorPanel();
+  }
+
+  if (authPanel?.classList.contains('visible') && !authPanel.contains(e.target) && !bar?.contains(e.target)) {
+    closeAuthPanel();
+  }
+
+  if (orderPanel?.classList.contains('visible') && !orderPanel.contains(e.target) && !bar?.contains(e.target)) {
+    closeOrderPickerPanel();
+  }
+
   if (!panel?.classList.contains('visible')) return;
   if (document.querySelector('.mr-ov.active')) return;
-  const bar = document.getElementById('sp-topbar');
   if (!panel.contains(e.target) && !bar?.contains(e.target)) hidePanel();
 });
 
@@ -995,6 +3950,7 @@ function capturarDados() {
   const textoCompleto = document.body.innerText;
   const url = window.location.href;
   const login = capturarLoginDoHTML();
+  const linhas = textoCompleto.split('\n');
 
   let modelo = '';
   const padroesModelo = [
@@ -1013,6 +3969,49 @@ function capturarDados() {
       break;
     }
   }
+  const modeloTemPedra = /pedra/i.test(modelo);
+
+  function findLineIndexByOccurrence(fragmento, ocorrencia = 0) {
+    let count = 0;
+    for (let i = 0; i < linhas.length; i += 1) {
+      if (!linhas[i].includes(fragmento)) continue;
+      if (count === ocorrencia) return i;
+      count += 1;
+    }
+    return -1;
+  }
+
+  function findLineIndexByRegex(regex) {
+    for (let i = 0; i < linhas.length; i += 1) {
+      if (regex.test(linhas[i])) return i;
+    }
+    return -1;
+  }
+
+  function hasComPedraNearby(index, fallbackText = '') {
+    if (/com\s+pedra/i.test(fallbackText)) return true;
+    if (index >= 0) {
+      for (let j = Math.max(0, index - 3); j <= Math.min(linhas.length - 1, index + 3); j += 1) {
+        if (/com\s+pedra/i.test(linhas[j])) return true;
+      }
+    }
+    return /com\s+pedra/i.test(modelo);
+  }
+
+  function extractModeloNearby(index) {
+    if (index < 0) return '';
+    for (let j = Math.max(0, index - 3); j <= Math.min(linhas.length - 1, index + 3); j += 1) {
+      const linhaBusca = linhas[j];
+      for (const padrao of padroesModelo) {
+        const matchModelo = linhaBusca.match(padrao);
+        if (!matchModelo) continue;
+        let modeloCompleto = matchModelo[1].replace(/\*\*/g, '').trim();
+        modeloCompleto = modeloCompleto.replace(/\s+(Banhad[ao]|Folhead[ao]).*$/i, '');
+        return modeloCompleto;
+      }
+    }
+    return '';
+  }
 
   const arosAvulsos = [];
   const padroesAro = textoCompleto.match(/Aro\s*-\s*([^\n|]+)/g);
@@ -1022,40 +4021,10 @@ function capturarDados() {
       const textoAro = match.replace(/Aro\s*-\s*/, '').trim();
       const numeroMatch = textoAro.match(/(\d+(?:\.\d+)?)/);
       const numero = numeroMatch ? numeroMatch[1] : '';
-      let comPedra = '';
-      if (/com\s+pedra/i.test(textoAro)) {
-        comPedra = ' com pedra';
-      } else {
-        const linhas = textoCompleto.split('\n');
-        for (let i = 0; i < linhas.length; i++) {
-          if (linhas[i].includes(match)) {
-            for (let j = Math.max(0, i - 3); j <= Math.min(linhas.length - 1, i + 3); j++) {
-              if (/com\s+pedra/i.test(linhas[j])) { comPedra = ' com pedra'; break; }
-            }
-            break;
-          }
-        }
-      }
-      let modeloAro = '';
-      const linhas = textoCompleto.split('\n');
-      for (let i = 0; i < linhas.length; i++) {
-        if (linhas[i].includes(match)) {
-          for (let j = Math.max(0, i - 3); j <= Math.min(linhas.length - 1, i + 3); j++) {
-            const linhaBusca = linhas[j];
-            for (const padrao of padroesModelo) {
-              const matchModelo = linhaBusca.match(padrao);
-              if (matchModelo) {
-                let modeloCompleto = matchModelo[1].replace(/\*\*/g, '').trim();
-                modeloCompleto = modeloCompleto.replace(/\s+(Banhad[ao]|Folhead[ao]).*$/i, '');
-                modeloAro = modeloCompleto;
-                break;
-              }
-            }
-            if (modeloAro) break;
-          }
-          break;
-        }
-      }
+      const matchIndex = findLineIndexByOccurrence(match, index);
+      const modeloAro = extractModeloNearby(matchIndex) || modelo;
+      const reforcoModeloSegundoAvulso = index === 1 && (/pedra/i.test(modeloAro) || modeloTemPedra);
+      const comPedra = hasComPedraNearby(matchIndex, textoAro) || reforcoModeloSegundoAvulso ? ' com pedra' : '';
       arosAvulsos.push({ numero: numero + comPedra, modelo: modeloAro || modelo });
     });
   } else {
@@ -1065,7 +4034,8 @@ function capturarDados() {
       const textoAro = aroMasculinoMatch[1].trim();
       const numeroMatch = textoAro.match(/(\d+(?:\.\d+)?)/);
       const numero = numeroMatch ? numeroMatch[1] : textoAro;
-      aroMasculino = numero + (/com\s+pedra/i.test(textoAro) ? ' com pedra' : '');
+      const linhaIndex = findLineIndexByRegex(/Masculino\s*-\s*/i);
+      aroMasculino = numero + (hasComPedraNearby(linhaIndex, textoAro) ? ' com pedra' : '');
     }
     const aroFemininoMatch = textoCompleto.match(/Feminino\s*-\s*([^\n|]+)/);
     let aroFeminino = '';
@@ -1073,7 +4043,8 @@ function capturarDados() {
       const textoAro = aroFemininoMatch[1].trim();
       const numeroMatch = textoAro.match(/(\d+(?:\.\d+)?)/);
       const numero = numeroMatch ? numeroMatch[1] : textoAro;
-      aroFeminino = numero + (/com\s+pedra/i.test(textoAro) ? ' com pedra' : '');
+      const linhaIndex = findLineIndexByRegex(/Feminino\s*-\s*/i);
+      aroFeminino = numero + (hasComPedraNearby(linhaIndex, textoAro) || modeloTemPedra ? ' com pedra' : '');
     }
     if (aroMasculino || aroFeminino) {
       arosAvulsos.push({ numero: aroMasculino, modelo: modelo, tipo: 'Masculino' });
@@ -1300,11 +4271,11 @@ function criarInterfaceAro(aro, index, isAvulso = false) {
   if (isAvulso && aro.modelo) {
     html += `<div style="margin-bottom:8px;">`;
     html += `<label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">MODELO</label>`;
-    html += `<input type="text" id="campo-modelo-aro-${index}" value="${aro.modelo}" style="width:100%;padding:6px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:12px;box-sizing:border-box;outline:none;">`;
+    html += `<input type="text" id="campo-modelo-aro-${index}" value="${aro.modelo}" autocomplete="off" spellcheck="false" style="width:100%;padding:6px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:12px;box-sizing:border-box;outline:none;">`;
     html += `</div>`;
   }
-  html += `<div style="margin-bottom:5px;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">ARO</label><input type="text" id="campo-aro-${index}" value="${aro.numero}" style="width:100%;padding:7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;"></div>`;
-  html += `<div style="position:relative;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">DADOS</label><input type="text" id="campo-valor-${index}" value="" style="width:100%;padding:7px 30px 7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;" placeholder="Dados..."><button class="btn-formatar" data-target="campo-valor-${index}" style="position:absolute;right:4px;bottom:4px;width:24px;height:24px;background:transparent;color:#ffffff;border:none;border-radius:4px;cursor:pointer;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;transition:all 0.2s;" title="Formatar texto">Aa</button></div>`;
+  html += `<div style="margin-bottom:5px;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">ARO</label><input type="text" id="campo-aro-${index}" value="${aro.numero}" autocomplete="off" spellcheck="false" style="width:100%;padding:7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;"></div>`;
+  html += `<div style="position:relative;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">DADOS</label><input type="text" id="campo-valor-${index}" value="" autocomplete="off" spellcheck="false" style="width:100%;padding:7px 30px 7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;" placeholder="Dados..."><button class="btn-formatar" data-target="campo-valor-${index}" style="position:absolute;right:4px;bottom:4px;width:24px;height:24px;background:transparent;color:#ffffff;border:none;border-radius:4px;cursor:pointer;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;transition:all 0.2s;" title="Formatar texto">Aa</button></div>`;
   html += `</div>`;
   return html;
 }
@@ -1377,16 +4348,17 @@ function mostrarPopup() {
   dados.aros.forEach((aro, index) => { arosHTML += criarInterfaceAro(aro, index, isAvulso); });
 
   if (dados.aros.length === 0) {
+    const femininoFallback = /pedra/i.test(dados.modelo || '') ? ' com pedra' : '';
     arosHTML = `
       <div style="margin-bottom:8px;padding:10px;border:1px solid rgba(255,255,255,0.08);border-radius:12px;background:rgba(255,255,255,0.04);">
         <span style="display:inline-block;padding:2px 8px;border-radius:20px;font-size:9px;font-weight:700;letter-spacing:1px;color:white;background:#6366f1;margin-bottom:8px;text-transform:uppercase;">Masculino</span>
-        <div style="margin-bottom:5px;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">ARO</label><input type="text" id="campo-aro-0" value="" style="width:100%;padding:7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;"></div>
-        <div style="position:relative;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">DADOS</label><input type="text" id="campo-valor-0" value="" style="width:100%;padding:7px 30px 7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;" placeholder="Dados..."><button class="btn-formatar" data-target="campo-valor-0" style="position:absolute;right:4px;bottom:4px;width:24px;height:24px;background:transparent;color:#ffffff;border:none;border-radius:4px;cursor:pointer;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;transition:all 0.2s;" title="Formatar texto">Aa</button></div>
+        <div style="margin-bottom:5px;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">ARO</label><input type="text" id="campo-aro-0" value="" autocomplete="off" spellcheck="false" style="width:100%;padding:7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;"></div>
+        <div style="position:relative;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">DADOS</label><input type="text" id="campo-valor-0" value="" autocomplete="off" spellcheck="false" style="width:100%;padding:7px 30px 7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;" placeholder="Dados..."><button class="btn-formatar" data-target="campo-valor-0" style="position:absolute;right:4px;bottom:4px;width:24px;height:24px;background:transparent;color:#ffffff;border:none;border-radius:4px;cursor:pointer;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;transition:all 0.2s;" title="Formatar texto">Aa</button></div>
       </div>
       <div style="margin-bottom:8px;padding:10px;border:1px solid rgba(255,255,255,0.08);border-radius:12px;background:rgba(255,255,255,0.04);">
         <span style="display:inline-block;padding:2px 8px;border-radius:20px;font-size:9px;font-weight:700;letter-spacing:1px;color:white;background:#ec4899;margin-bottom:8px;text-transform:uppercase;">Feminino</span>
-        <div style="margin-bottom:5px;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">ARO</label><input type="text" id="campo-aro-1" value="" style="width:100%;padding:7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;"></div>
-        <div style="position:relative;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">DADOS</label><input type="text" id="campo-valor-1" value="" style="width:100%;padding:7px 30px 7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;" placeholder="Dados..."><button class="btn-formatar" data-target="campo-valor-1" style="position:absolute;right:4px;bottom:4px;width:24px;height:24px;background:transparent;color:#ffffff;border:none;border-radius:4px;cursor:pointer;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;transition:all 0.2s;" title="Formatar texto">Aa</button></div>
+        <div style="margin-bottom:5px;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">ARO</label><input type="text" id="campo-aro-1" value="${femininoFallback}" autocomplete="off" spellcheck="false" style="width:100%;padding:7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;"></div>
+        <div style="position:relative;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">DADOS</label><input type="text" id="campo-valor-1" value="" autocomplete="off" spellcheck="false" style="width:100%;padding:7px 30px 7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;" placeholder="Dados..."><button class="btn-formatar" data-target="campo-valor-1" style="position:absolute;right:4px;bottom:4px;width:24px;height:24px;background:transparent;color:#ffffff;border:none;border-radius:4px;cursor:pointer;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;transition:all 0.2s;" title="Formatar texto">Aa</button></div>
       </div>`;
   }
 
@@ -1405,10 +4377,10 @@ function mostrarPopup() {
     <div id="conteudo-principal">
       <div style="margin-bottom:10px;">
         <label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">LOGIN</label>
-        <input type="text" id="campo-login" value="${dados.login}" style="width:100%;padding:7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;">
+        <input type="text" id="campo-login" value="${dados.login}" autocomplete="off" spellcheck="false" style="width:100%;padding:7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;">
       </div>
       ${(!isAvulso || !dados.aros.some(aro => aro.modelo)) ?
-        `<div style="margin-bottom:10px;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">MODELO</label><textarea id="campo-modelo" style="width:100%;padding:7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;max-height:50px;resize:none;line-height:1.4;">${dados.modelo}</textarea></div>` : ''}
+      `<div style="margin-bottom:10px;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">MODELO</label><textarea id="campo-modelo" autocomplete="off" spellcheck="false" style="width:100%;padding:7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;max-height:50px;resize:none;line-height:1.4;">${dados.modelo}</textarea></div>` : ''}
       ${arosHTML}
       <input type="hidden" id="campo-url" value="${dados.url}">
     </div>
@@ -1679,13 +4651,27 @@ function coletarDadosDaInterface(dadosOriginais) {
   const modelo = document.getElementById('campo-modelo')?.value || '';
   const url = document.getElementById('campo-url')?.value || '';
   const aros = [];
+  const modeloTemPedra = /pedra/i.test(modelo);
+  const appendComPedra = (numero, shouldAppend) => {
+    const base = (numero || '').trim();
+    if (!base) return base;
+    if (!shouldAppend || /com\s+pedra/i.test(base)) return base;
+    return `${base} com pedra`;
+  };
   if (dadosOriginais.aros.length > 0) {
     dadosOriginais.aros.forEach((aro, index) => {
       const campoAro = document.getElementById(`campo-aro-${index}`);
       const campoValor = document.getElementById(`campo-valor-${index}`);
       const campoModeloAro = document.getElementById(`campo-modelo-aro-${index}`);
       if (campoAro) {
-        aros.push({ numero: campoAro.value.trim(), valor: campoValor ? campoValor.value.trim() : '', tipo: aro.tipo, modelo: campoModeloAro ? campoModeloAro.value : aro.modelo });
+        const modeloAro = campoModeloAro ? campoModeloAro.value : aro.modelo;
+        const reforcoPedra = (aro.tipo === 'Feminino') || (!aro.tipo && index === 1 && (/pedra/i.test(modeloAro || '') || modeloTemPedra));
+        aros.push({
+          numero: appendComPedra(campoAro.value, reforcoPedra),
+          valor: campoValor ? campoValor.value.trim() : '',
+          tipo: aro.tipo,
+          modelo: modeloAro
+        });
       }
     });
   } else {
@@ -1694,7 +4680,12 @@ function coletarDadosDaInterface(dadosOriginais) {
     const campoAroFem = document.getElementById('campo-aro-1');
     const campoValorFem = document.getElementById('campo-valor-1');
     aros.push({ numero: campoAroMasc ? campoAroMasc.value.trim() : '', valor: campoValorMasc ? campoValorMasc.value.trim() : '', tipo: 'Masculino', modelo });
-    aros.push({ numero: campoAroFem ? campoAroFem.value.trim() : '', valor: campoValorFem ? campoValorFem.value.trim() : '', tipo: 'Feminino', modelo });
+    aros.push({
+      numero: appendComPedra(campoAroFem ? campoAroFem.value.trim() : '', modeloTemPedra),
+      valor: campoValorFem ? campoValorFem.value.trim() : '',
+      tipo: 'Feminino',
+      modelo
+    });
   }
   return { login, modelo, aros, url };
 }
@@ -1774,7 +4765,7 @@ if (window.location.hostname.includes('mercadolivre.com.br') || window.location.
       const dadosPagina = capturarDados();
       if (dadosPagina.login || dadosPagina.modelo) {
         salvarDados(dadosPagina);
-        mostrarNotificacao('Dados da página capturados em segundo plano!');
+        
       }
     } else {
       if (dadosJaSalvos.url !== window.location.href) atualizarApenasURL(window.location.href);
@@ -1801,6 +4792,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'openEditor') {
     showPanel();
     return;
+  }
+  if (message.action === 'open_hub_account') {
+    try {
+      toggleAuthPanel();
+      sendResponse?.({ success: true });
+    } catch (error) {
+      sendResponse?.({ success: false, error: error.message });
+    }
+    return true;
   }
   // Clip
   if (message.action === 'capturar_e_copiar') {

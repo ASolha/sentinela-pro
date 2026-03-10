@@ -4,15 +4,9 @@
 let isMonitoring = true;
 let notifiedOrders = new Set();
 let processedElements = new Set();
+const GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.send'];
 
-// Clip: clique no ícone da extensão abre o overlay de Clip
-chrome.action.onClicked.addListener((tab) => {
-  chrome.tabs.sendMessage(tab.id, { action: 'capturar_e_copiar' }, (response) => {
-    if (chrome.runtime.lastError) {
-      console.error('Erro ao comunicar com a página:', chrome.runtime.lastError);
-    }
-  });
-});
+// Clique no ícone da extensão não executa ações do hub.
 
 // Inicialização
 chrome.runtime.onStartup.addListener(initializeExtension);
@@ -36,8 +30,65 @@ async function initializeExtension() {
   processedElements.clear();
 }
 
+async function openOrderTabs(urls) {
+  for (const url of urls) {
+    await chrome.tabs.create({
+      url,
+      active: false
+    });
+  }
+}
+
 // Mensagens do content script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'OPEN_ORDER_TABS') {
+    const urls = Array.isArray(message.urls) ? message.urls : [];
+
+    openOrderTabs(urls)
+      .then(() => sendResponse({ ok: true, opened: urls.length }))
+      .catch((error) => {
+        sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+
+    return true;
+  }
+
+  if (message?.type === 'GET_GMAIL_TOKEN') {
+    chrome.identity.getAuthToken({ interactive: false, scopes: GMAIL_SCOPES }, (cachedToken) => {
+      if (!chrome.runtime.lastError && cachedToken) {
+        sendResponse({ token: cachedToken });
+        return;
+      }
+
+      chrome.identity.getAuthToken({ interactive: true, scopes: GMAIL_SCOPES }, (token) => {
+        if (chrome.runtime.lastError) {
+          sendResponse({ error: chrome.runtime.lastError.message });
+        } else if (!token) {
+          sendResponse({ error: 'Token nao obtido. Verifique as permissoes OAuth2.' });
+        } else {
+          sendResponse({ token });
+        }
+      });
+    });
+
+    return true;
+  }
+
+  if (message?.type === 'REVOKE_GMAIL_TOKEN') {
+    chrome.identity.getAuthToken({ interactive: false, scopes: GMAIL_SCOPES }, (token) => {
+      if (token) {
+        chrome.identity.removeCachedAuthToken({ token }, () => {
+          fetch(`https://accounts.google.com/o/oauth2/revoke?token=${token}`).catch(() => {});
+        });
+      }
+    });
+
+    return false;
+  }
+
   switch (message.action) {
     case 'orderFound':
       handleOrderFound(message.orderNumber, message.elementHash, sender.tab);
@@ -160,13 +211,8 @@ async function refreshAllMLTabs() {
 async function updateBadgeAndNotify() {
   const count = await countRelevantTabs();
 
-  chrome.action.setBadgeText({ text: count > 0 ? count.toString() : '' });
-  chrome.action.setBadgeBackgroundColor({ color: '#FF4444' });
-  chrome.action.setTitle({
-    title: count > 0
-      ? `Sentinela Pro — ${count} aba${count !== 1 ? 's' : ''} ML abertas`
-      : 'Sentinela Pro'
-  });
+  chrome.action.setBadgeText({ text: '' });
+  chrome.action.setTitle({ title: 'Sentinela Pro' });
 
   // Broadcast para todos os content scripts ML para atualizar o botão na top bar
   const mlTabs = await chrome.tabs.query({});
