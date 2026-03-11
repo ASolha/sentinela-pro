@@ -1048,7 +1048,10 @@ function createTopBar() {
       overlay.remove();
       btnClip.classList.remove('sp-active');
     } else {
-      mostrarPopup();
+      mostrarPopup().catch((error) => {
+        console.error('[Sentinela Pro] Erro ao abrir o clip:', error);
+        mostrarNotificacao('Erro ao abrir a interface', 'error');
+      });
       btnClip.classList.add('sp-active');
     }
   });
@@ -4165,9 +4168,8 @@ function clipSanitizeMasculinoField() {
   });
 }
 
-function clipNeedsFreshCapture(dados, currentUrl = window.location.href) {
-  if (!dados || typeof dados !== 'object') return true;
-  if (!dados.url || dados.url !== currentUrl) return true;
+function clipNeedsFreshCapture(dados) {
+  if (!clipHasMeaningfulData(dados)) return true;
   if (!dados.login) return true;
 
   const aros = Array.isArray(dados.aros) ? dados.aros : [];
@@ -4443,6 +4445,129 @@ function limparDadosSalvos() {
   catch (e) { console.error('Erro ao limpar dados da sessão:', e); }
 }
 
+function clipEmptyData() {
+  return { login: '', modelo: '', aros: [], url: '', sourceUrl: '', capturedAt: 0 };
+}
+
+function normalizeClipStoredData(dados) {
+  if (!dados || typeof dados !== 'object') return clipEmptyData();
+  return {
+    login: String(dados.login || '').trim(),
+    modelo: String(dados.modelo || '').trim(),
+    aros: Array.isArray(dados.aros) ? dados.aros : [],
+    url: String(dados.url || '').trim(),
+    sourceUrl: String(dados.sourceUrl || dados.url || '').trim(),
+    capturedAt: Number(dados.capturedAt) || 0
+  };
+}
+
+function clipHasMeaningfulData(dados) {
+  const normalized = normalizeClipStoredData(dados);
+  return Boolean(normalized.login || normalized.modelo || normalized.aros.length > 0);
+}
+
+function clipCaptureScore(dados) {
+  const normalized = normalizeClipStoredData(dados);
+  let score = 0;
+
+  if (normalized.login) score += 2;
+  if (normalized.modelo) score += 3;
+  if (normalized.url) score += 1;
+
+  normalized.aros.forEach((aro) => {
+    if (aro?.numero || aro?.value) score += 2;
+    if (aro?.modelo || aro?.model) score += 1;
+    if (aro?.tipo || aro?.type) score += 1;
+  });
+
+  return score;
+}
+
+function clipShouldReplaceStoredData(existingData, nextData) {
+  if (!clipHasMeaningfulData(existingData)) return true;
+  if (!clipHasMeaningfulData(nextData)) return false;
+  return clipCaptureScore(nextData) >= clipCaptureScore(existingData);
+}
+
+function getClipStorageValue() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([SESSION_STORAGE_KEY], (result) => {
+      if (chrome.runtime?.lastError) {
+        console.error('Erro ao carregar dados do clip:', chrome.runtime.lastError);
+        resolve(clipEmptyData());
+        return;
+      }
+      resolve(normalizeClipStoredData(result?.[SESSION_STORAGE_KEY]));
+    });
+  });
+}
+
+function setClipStorageValue(dados) {
+  return new Promise((resolve) => {
+    chrome.storage.local.set({ [SESSION_STORAGE_KEY]: dados }, () => {
+      if (chrome.runtime?.lastError) {
+        console.error('Erro ao salvar dados do clip:', chrome.runtime.lastError);
+      }
+      resolve();
+    });
+  });
+}
+
+async function salvarDadosClip(dados, options = {}) {
+  const { force = false } = options;
+  const normalizedIncoming = normalizeClipStoredData({
+    ...dados,
+    sourceUrl: dados?.sourceUrl || dados?.url || window.location.href,
+    url: dados?.url || window.location.href,
+    capturedAt: Date.now()
+  });
+
+  const dadosExistentes = await carregarDadosClip();
+  const dadosParaSalvar = (!force && !clipShouldReplaceStoredData(dadosExistentes, normalizedIncoming))
+    ? { ...dadosExistentes, url: normalizedIncoming.url || dadosExistentes.url }
+    : normalizedIncoming;
+
+  await setClipStorageValue(dadosParaSalvar);
+  return dadosParaSalvar;
+}
+
+async function atualizarApenasURLClip(novoURL) {
+  try {
+    const dadosExistentes = await carregarDadosClip();
+    if (clipHasMeaningfulData(dadosExistentes)) {
+      const atualizados = { ...dadosExistentes, url: novoURL };
+      await setClipStorageValue(atualizados);
+      const campoURL = document.getElementById('campo-url');
+      if (campoURL) campoURL.value = novoURL;
+      return true;
+    }
+    return false;
+  } catch (e) {
+    console.error('Erro ao atualizar URL:', e);
+    return false;
+  }
+}
+
+async function carregarDadosClip() {
+  try {
+    return await getClipStorageValue();
+  } catch (e) {
+    console.error('Erro ao carregar dados do clip:', e);
+    return clipEmptyData();
+  }
+}
+
+async function limparDadosSalvosClip() {
+  return new Promise((resolve) => {
+    chrome.storage.local.remove(SESSION_STORAGE_KEY, () => {
+      if (chrome.runtime?.lastError) {
+        console.error('Erro ao limpar dados do clip:', chrome.runtime.lastError);
+      }
+      resolve();
+    });
+  });
+}
+
 function inserirSimboloNoCursor(campo, simbolo) {
   const posicaoInicial = campo.selectionStart;
   const posicaoFinal = campo.selectionEnd;
@@ -4630,16 +4755,15 @@ function makeClipDraggable(container) {
   }
 }
 
-function mostrarPopup() {
+async function mostrarPopup() {
   const popupExistente = document.getElementById('extensao-popup-overlay');
   if (popupExistente) popupExistente.remove();
 
-  let dados = carregarDados();
+  let dados = await carregarDadosClip();
   if (clipNeedsFreshCapture(dados)) {
     const dadosPagina = capturarDados();
-    if (dadosPagina.login || dadosPagina.modelo || (Array.isArray(dadosPagina.aros) && dadosPagina.aros.length > 0)) {
-      salvarDados(dadosPagina);
-      dados = dadosPagina;
+    if (clipHasMeaningfulData(dadosPagina)) {
+      dados = await salvarDadosClip(dadosPagina);
     }
   }
   const isAvulso = dados.aros.length > 0 && !dados.aros[0].tipo;
@@ -4760,12 +4884,12 @@ function mostrarPopup() {
   const recapturarBtn = document.getElementById('recapturar-dados');
   recapturarBtn.addEventListener('mouseenter', () => { recapturarBtn.style.background = 'rgba(255,255,255,0.08)'; recapturarBtn.style.color = 'rgba(255,255,255,0.9)'; });
   recapturarBtn.addEventListener('mouseleave', () => { recapturarBtn.style.background = 'transparent'; recapturarBtn.style.color = 'rgba(255,255,255,0.6)'; });
-  recapturarBtn.addEventListener('click', () => {
+  recapturarBtn.addEventListener('click', async () => {
     const popupOverlay = document.getElementById('extensao-popup-overlay');
     if (popupOverlay) popupOverlay.remove();
     const novosDados = capturarDados();
-    salvarDados(novosDados);
-    mostrarPopup();
+    await salvarDadosClip(novosDados, { force: true });
+    await mostrarPopup();
     mostrarNotificacao('Dados da página foram recapturados!');
   });
 
@@ -4777,12 +4901,14 @@ function mostrarPopup() {
     const dadosParaCopiar = coletarDadosDaInterface(dados);
     const textoFormatado = formatarTextoParaCopia(dadosParaCopiar);
     const closeClip = () => { container.remove(); document.getElementById('sp-btn-clip')?.classList.remove('sp-active'); };
-    navigator.clipboard.writeText(textoFormatado).then(() => {
-      mostrarNotificacao('Dados copiados com sucesso!'); limparDadosSalvos(); closeClip();
+    navigator.clipboard.writeText(textoFormatado).then(async () => {
+      mostrarNotificacao('Dados copiados com sucesso!'); await limparDadosSalvosClip(); closeClip();
     }).catch(() => {
       const ta = document.createElement('textarea'); ta.value = textoFormatado;
       document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
-      mostrarNotificacao('Dados copiados com sucesso!'); limparDadosSalvos(); closeClip();
+      (async () => {
+        mostrarNotificacao('Dados copiados com sucesso!'); await limparDadosSalvosClip(); closeClip();
+      })();
     });
   });
 
@@ -4949,7 +5075,7 @@ function mostrarPopup() {
       confirmarEnviarBtn.textContent = 'Enviando...'; confirmarEnviarBtn.style.opacity = '0.7';
       try {
         await criarCardFefrello(config.boardId, columnId, titulo, descricao, responsible);
-        mostrarNotificacao('Card criado com sucesso!'); limparDadosSalvos(); container.remove(); document.getElementById('sp-btn-clip')?.classList.remove('sp-active');
+        mostrarNotificacao('Card criado com sucesso!'); await limparDadosSalvosClip(); container.remove(); document.getElementById('sp-btn-clip')?.classList.remove('sp-active');
       } catch (e) {
         mostrarNotificacao('Erro ao criar card: ' + e.message, 'error');
         confirmarEnviarBtn.disabled = false; confirmarEnviarBtn.textContent = textoOriginal; confirmarEnviarBtn.style.opacity = '1';
@@ -5063,19 +5189,25 @@ function mostrarNotificacaoURL(mensagem) {
 let urlAtual = window.location.href;
 
 function monitorarMudancasURL() {
-  setInterval(() => {
+  setInterval(async () => {
     const novaURL = window.location.href;
     if (novaURL !== urlAtual) {
       urlAtual = novaURL;
       const dadosPagina = capturarDados();
-      if (dadosPagina.login || dadosPagina.modelo || (Array.isArray(dadosPagina.aros) && dadosPagina.aros.length > 0)) {
-        salvarDados(dadosPagina);
-        console.log('[Sentinela Pro] Dados recapturados automaticamente:', novaURL);
-        mostrarNotificacaoURL('Dados recapturados');
+      if (clipHasMeaningfulData(dadosPagina)) {
+        const dadosAntes = await carregarDadosClip();
+        const dadosSalvos = await salvarDadosClip(dadosPagina);
+        if (clipShouldReplaceStoredData(dadosAntes, dadosPagina)) {
+          console.log('[Sentinela Pro] Dados recapturados automaticamente:', novaURL);
+          mostrarNotificacaoURL('Dados recapturados');
+        } else if (dadosSalvos.url === novaURL) {
+          console.log('[Sentinela Pro] URL atualizado automaticamente:', novaURL);
+          mostrarNotificacaoURL('URL atualizado');
+        }
       } else {
-        const dadosExistentes = carregarDados();
-        if (dadosExistentes && (dadosExistentes.login || dadosExistentes.modelo)) {
-          const foiAtualizado = atualizarApenasURL(novaURL);
+        const dadosExistentes = await carregarDadosClip();
+        if (clipHasMeaningfulData(dadosExistentes)) {
+          const foiAtualizado = await atualizarApenasURLClip(novaURL);
           if (foiAtualizado) {
             console.log('[Sentinela Pro] URL atualizado automaticamente:', novaURL);
             mostrarNotificacaoURL('URL atualizado');
@@ -5090,17 +5222,16 @@ function monitorarMudancasURL() {
 // CLIP: EXECUÇÃO PRINCIPAL (captura automática ao carregar)
 // ══════════════════════════════════════════════════════════════
 if (window.location.hostname.includes('mercadolivre.com.br') || window.location.hostname.includes('mercadolibre.com')) {
-  window.addEventListener('load', () => {
+  window.addEventListener('load', async () => {
     monitorarMudancasURL();
-    const dadosJaSalvos = carregarDados();
+    const dadosJaSalvos = await carregarDadosClip();
     if (clipNeedsFreshCapture(dadosJaSalvos)) {
       const dadosPagina = capturarDados();
-      if (dadosPagina.login || dadosPagina.modelo || (Array.isArray(dadosPagina.aros) && dadosPagina.aros.length > 0)) {
-        salvarDados(dadosPagina);
-        
+      if (clipHasMeaningfulData(dadosPagina)) {
+        await salvarDadosClip(dadosPagina);
       }
     } else {
-      if (dadosJaSalvos.url !== window.location.href) atualizarApenasURL(window.location.href);
+      if (dadosJaSalvos.url !== window.location.href) await atualizarApenasURLClip(window.location.href);
     }
   });
 }
@@ -5136,14 +5267,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   // Clip
   if (message.action === 'capturar_e_copiar') {
-    try {
-      mostrarPopup();
+    mostrarPopup().then(() => {
       sendResponse({ success: true });
-    } catch (error) {
+    }).catch((error) => {
       console.error('[Sentinela Pro] Erro ao mostrar popup:', error);
       mostrarNotificacao('Erro ao abrir a interface', 'error');
       sendResponse({ success: false, error: error.message });
-    }
+    });
     return true;
   }
   // Ranger Counter — atualiza badge do botão na top bar
