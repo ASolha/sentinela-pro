@@ -8,6 +8,7 @@
 // ══════════════════════════════════════════════════════════════
 
 const PEGADOR_STORAGE_KEY = 'pegadorLastQuantity';
+const ORDER_PICKER_TABLE = 'order_picker_history';
 const HUB_SESSION_KEY = 'sp_hub_session';
 const HUB_BUTTON_ORDER_KEY = 'sp_hub_button_order';
 const HUB_DEFAULT_BUTTON_ORDER = ['passo', 'clip', 'counter', 'orders', 'gestor'];
@@ -31,6 +32,10 @@ let gestorFefrelloSentIds = new Set();
 let gestorExpandedCardId = null;
 let gestorPanelSavedPos = null;
 let gestorPanelPositionLoaded = false;
+let orderPickerCurrentView = 'picker';
+let orderPickerHistoryCache = [];
+let orderPickerHistoryLoaded = false;
+let orderPickerHistoryLoading = false;
 
 const GESTOR_IGNORE_MODEL_TERMS = [
   /pend[êe]ncia/i,
@@ -156,11 +161,12 @@ async function sbFetch(path, opts = {}) {
     } catch (_) {}
     if (typeof message === 'string' && (
       message.includes('passo_largo_user_data') ||
+      message.includes(ORDER_PICKER_TABLE) ||
       message.includes('Could not find the table') ||
       message.includes('relation') ||
       message.includes('does not exist')
     )) {
-      message = 'A tabela passo_largo_user_data ainda não existe no Supabase. Rode o SQL de criação primeiro.';
+      message = 'A tabela necessária ainda não existe no Supabase. Rode o SQL de criação primeiro.';
     }
     throw new Error(message);
   }
@@ -2887,6 +2893,8 @@ function collectOrdersFromBottom(quantity) {
 
     selectedOrders.push({
       orderId,
+      numeroVenda: orderId,
+      loginCliente: getOrderBuyerLoginFromPickerRow(row),
       url: getOrderDetailUrl(orderId)
     });
   }
@@ -2903,6 +2911,506 @@ function setOrderPickerStatus(message, tone = 'info') {
   if (!status) return;
   status.textContent = message;
   status.dataset.tone = tone;
+}
+
+function normalizeOrderPickerLogin(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 120);
+}
+
+function normalizeOrderPickerSaleNumber(value) {
+  return String(value || '').replace(/\D+/g, '');
+}
+
+function getOrderPickerSearchKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+}
+
+function extractOrderPickerLoginFromText(text) {
+  const raw = String(text || '').replace(/\u00a0/g, ' ').trim();
+  if (!raw) return '';
+
+  const labeledPatterns = [
+    /comprador\s*:?\s*([a-z0-9._-]{3,})/i,
+    /cliente\s*:?\s*([a-z0-9._-]{3,})/i,
+    /nickname\s*:?\s*([a-z0-9._-]{3,})/i,
+    /usuario\s*:?\s*([a-z0-9._-]{3,})/i,
+    /@([a-z0-9._-]{3,})/i,
+    /([a-z0-9._-]{3,})\s*\|\s*CPF/i
+  ];
+
+  for (const pattern of labeledPatterns) {
+    const match = raw.match(pattern);
+    if (match?.[1]) return normalizeOrderPickerLogin(match[1]);
+  }
+
+  const blockedTerms = ['mercado livre', 'entrega', 'full', 'flex', 'venda', 'pedido', 'enviado', 'cancelado', 'pago'];
+  const lines = raw.split(/\n+/).map((line) => line.trim()).filter(Boolean);
+  for (const line of lines) {
+    const lowered = line.toLowerCase();
+    if (blockedTerms.some((term) => lowered.includes(term))) continue;
+    if (/^#?\d{6,}$/.test(line)) continue;
+    const token = line.match(/\b([a-z0-9._-]{3,})\b/i)?.[1] || '';
+    if (token && !/^\d+$/.test(token)) return normalizeOrderPickerLogin(token);
+  }
+
+  return normalizeOrderPickerLogin(getGestorLoginFromPage(raw));
+}
+
+function getOrderBuyerLoginFromPickerRow(row) {
+  if (!row) return '';
+
+  const exactNicknameNode = row.querySelector('.buyer.ml-buyer .buyer-nickName, .buyer-nickName, [class*="buyer-nick"]');
+  if (exactNicknameNode?.textContent) {
+    const login = normalizeOrderPickerLogin(exactNicknameNode.textContent);
+    if (login) return login;
+  }
+
+  const selectors = [
+    '.buyer.ml-buyer',
+    '[data-testid*="buyer"]',
+    '[data-testid*="customer"]',
+    '[data-testid*="nickname"]',
+    '[class*="buyer-nick"]',
+    '[class*="buyer"]',
+    '[class*="customer"]',
+    '[class*="nickname"]',
+    '[class*="client"]',
+    '[class*="user"]'
+  ];
+
+  for (const selector of selectors) {
+    const nodes = row.querySelectorAll(selector);
+    for (const node of nodes) {
+      const login = extractOrderPickerLoginFromText(node.textContent || '');
+      if (login) return login;
+    }
+  }
+
+  const htmlMatch = row.innerHTML.match(/buyer-nickName[^>]*>\s*([^<\s]+)/i)
+    || row.innerHTML.match(/"nickName":"([^"]+)"/i);
+  if (htmlMatch?.[1]) {
+    const login = normalizeOrderPickerLogin(htmlMatch[1]);
+    if (login) return login;
+  }
+
+  return extractOrderPickerLoginFromText(row.innerText || row.textContent || '');
+}
+
+function normalizeOrderPickerHistoryEntry(entry) {
+  const numeroVenda = normalizeOrderPickerSaleNumber(entry?.numero_venda || entry?.orderId);
+  if (!numeroVenda) return null;
+
+  const parsedDate = Date.parse(entry?.selected_at || entry?.selectedAt || entry?.created_at || '');
+  const loginCliente = normalizeOrderPickerLogin(entry?.login_cliente || entry?.loginCliente);
+
+  return {
+    id: String(entry?.id || `${numeroVenda}-${parsedDate || Date.now()}`),
+    loginCliente: loginCliente || 'Sem login identificado',
+    loginKey: getOrderPickerSearchKey(loginCliente),
+    numeroVenda,
+    url: typeof entry?.url === 'string' && entry.url ? entry.url : getOrderDetailUrl(numeroVenda),
+    selectedAt: Number.isNaN(parsedDate) ? new Date().toISOString() : new Date(parsedDate).toISOString()
+  };
+}
+
+function normalizeOrderPickerHistory(entries) {
+  if (!Array.isArray(entries)) return [];
+  return entries
+    .map(normalizeOrderPickerHistoryEntry)
+    .filter(Boolean)
+    .sort((a, b) => Date.parse(b.selectedAt) - Date.parse(a.selectedAt));
+}
+
+async function loadOrderPickerHistory(force = false) {
+  if (!hasAuthSession()) {
+    orderPickerHistoryCache = [];
+    orderPickerHistoryLoaded = true;
+    orderPickerHistoryLoading = false;
+    return [];
+  }
+
+  if (orderPickerHistoryLoaded && !force) return orderPickerHistoryCache;
+
+  orderPickerHistoryLoading = true;
+  try {
+    const rows = await sbFetch(`/rest/v1/${ORDER_PICKER_TABLE}?user_id=eq.${auth.user.id}&order=selected_at.desc&select=id,login_cliente,numero_venda,url,selected_at,created_at`);
+    orderPickerHistoryCache = normalizeOrderPickerHistory(rows);
+    orderPickerHistoryLoaded = true;
+    return orderPickerHistoryCache;
+  } finally {
+    orderPickerHistoryLoading = false;
+  }
+}
+
+async function saveOrderPickerHistoryEntries(entries) {
+  if (!hasAuthSession()) {
+    throw new Error('Faça login no Hub para registrar os pedidos.');
+  }
+
+  const selectedAt = new Date().toISOString();
+  const payload = entries
+    .map((entry) => {
+      const numeroVenda = normalizeOrderPickerSaleNumber(entry?.numeroVenda || entry?.orderId);
+      if (!numeroVenda) return null;
+      return {
+        user_id: auth.user.id,
+        login_cliente: normalizeOrderPickerLogin(entry?.loginCliente) || 'Sem login identificado',
+        numero_venda: numeroVenda,
+        url: typeof entry?.url === 'string' ? entry.url : getOrderDetailUrl(numeroVenda),
+        selected_at: selectedAt
+      };
+    })
+    .filter(Boolean);
+
+  if (!payload.length) return;
+
+  await sbFetch(`/rest/v1/${ORDER_PICKER_TABLE}`, {
+    method: 'POST',
+    headers: {
+      Prefer: 'return=representation'
+    },
+    body: JSON.stringify(payload)
+  });
+
+  await loadOrderPickerHistory(true);
+}
+
+async function deleteOrderPickerHistoryEntry(id) {
+  if (!hasAuthSession() || !id) return;
+
+  await sbFetch(`/rest/v1/${ORDER_PICKER_TABLE}?id=eq.${encodeURIComponent(id)}&user_id=eq.${auth.user.id}`, {
+    method: 'DELETE',
+    headers: {
+      Prefer: 'return=minimal'
+    }
+  });
+
+  orderPickerHistoryCache = orderPickerHistoryCache.filter((entry) => entry.id !== String(id));
+}
+
+async function clearOrderPickerHistory() {
+  if (!hasAuthSession()) return;
+
+  await sbFetch(`/rest/v1/${ORDER_PICKER_TABLE}?user_id=eq.${auth.user.id}`, {
+    method: 'DELETE',
+    headers: {
+      Prefer: 'return=minimal'
+    }
+  });
+
+  orderPickerHistoryCache = [];
+  orderPickerHistoryLoaded = true;
+}
+
+function formatOrderPickerDate(value) {
+  const parsed = Date.parse(value || '');
+  if (Number.isNaN(parsed)) return '-';
+  return new Date(parsed).toLocaleString('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function getOrderPickerPeriodStart(period, referenceDate = new Date()) {
+  const start = new Date(referenceDate);
+  start.setSeconds(0, 0);
+
+  if (period === 'day') {
+    start.setHours(0, 0, 0, 0);
+    return start;
+  }
+
+  if (period === 'week') {
+    const day = start.getDay();
+    const diff = day === 0 ? -6 : 1 - day;
+    start.setDate(start.getDate() + diff);
+    start.setHours(0, 0, 0, 0);
+    return start;
+  }
+
+  start.setDate(1);
+  start.setHours(0, 0, 0, 0);
+  return start;
+}
+
+function countUniqueOrderPickerSales(entries) {
+  return new Set(entries.map((entry) => entry.numeroVenda)).size;
+}
+
+function getOrderPickerSummary(entries) {
+  const now = new Date();
+  return [
+    { key: 'day', label: 'Hoje' },
+    { key: 'week', label: 'Semana' },
+    { key: 'month', label: 'Mês' }
+  ].map((period) => {
+    const start = getOrderPickerPeriodStart(period.key, now).getTime();
+    const periodEntries = entries.filter((entry) => Date.parse(entry.selectedAt) >= start);
+    return {
+      label: period.label,
+      total: countUniqueOrderPickerSales(periodEntries)
+    };
+  });
+}
+
+function getOrderPickerSearchMatches(entries, loginTerm, saleTerm) {
+  const loginKey = getOrderPickerSearchKey(loginTerm);
+  const numeroVenda = normalizeOrderPickerSaleNumber(saleTerm);
+
+  return entries.filter((entry) => {
+    const matchesLogin = !loginKey || entry.loginKey.includes(loginKey);
+    const matchesSale = !numeroVenda || entry.numeroVenda.includes(numeroVenda);
+    return matchesLogin && matchesSale;
+  });
+}
+
+function isSameOrderPickerDay(a, b) {
+  return a.getFullYear() === b.getFullYear()
+    && a.getMonth() === b.getMonth()
+    && a.getDate() === b.getDate();
+}
+
+function getOrderPickerHistoryGroups(entries) {
+  const now = new Date();
+  const todayStart = getOrderPickerPeriodStart('day', now);
+  const yesterdayStart = new Date(todayStart);
+  yesterdayStart.setDate(yesterdayStart.getDate() - 1);
+  const weekStart = getOrderPickerPeriodStart('week', now);
+  const lastWeekStart = new Date(weekStart);
+  lastWeekStart.setDate(lastWeekStart.getDate() - 7);
+  const monthStart = getOrderPickerPeriodStart('month', now);
+
+  const buckets = [
+    { key: 'today', label: 'Hoje', entries: [] },
+    { key: 'yesterday', label: 'Ontem', entries: [] },
+    { key: 'this_week', label: 'Esta semana', entries: [] },
+    { key: 'last_week', label: 'Semana passada', entries: [] },
+    { key: 'this_month', label: 'Este mês', entries: [] },
+    { key: 'older', label: 'Mais antigos', entries: [] }
+  ];
+
+  entries.forEach((entry) => {
+    const selectedAt = new Date(entry.selectedAt);
+    const time = selectedAt.getTime();
+    if (Number.isNaN(time)) {
+      buckets[5].entries.push(entry);
+      return;
+    }
+
+    if (isSameOrderPickerDay(selectedAt, now)) {
+      buckets[0].entries.push(entry);
+      return;
+    }
+    if (isSameOrderPickerDay(selectedAt, yesterdayStart)) {
+      buckets[1].entries.push(entry);
+      return;
+    }
+    if (time >= weekStart.getTime()) {
+      buckets[2].entries.push(entry);
+      return;
+    }
+    if (time >= lastWeekStart.getTime()) {
+      buckets[3].entries.push(entry);
+      return;
+    }
+    if (time >= monthStart.getTime()) {
+      buckets[4].entries.push(entry);
+      return;
+    }
+    buckets[5].entries.push(entry);
+  });
+
+  return buckets.filter((bucket) => bucket.entries.length > 0);
+}
+
+function setOrderPickerView(view, panel = document.getElementById('sp-order-panel') || createOrderPickerPanel()) {
+  const nextView = view === 'history' ? 'history' : 'picker';
+  orderPickerCurrentView = nextView;
+
+  panel.querySelectorAll('.sp-order-tab').forEach((button) => {
+    const isActive = button.dataset.view === nextView;
+    button.classList.toggle('is-active', isActive);
+    button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  });
+
+  panel.querySelectorAll('.sp-order-view').forEach((section) => {
+    section.classList.toggle('is-active', section.dataset.view === nextView);
+  });
+
+  if (nextView === 'history') {
+    void refreshOrderPickerDashboard(panel);
+  }
+}
+
+function renderOrderPickerSessionState(panel) {
+  const sessionBox = panel?.querySelector('#sp-order-session');
+  const quantityInput = panel?.querySelector('#sp-order-quantity');
+  const runButton = panel?.querySelector('#sp-order-run');
+  const searchInputs = panel ? Array.from(panel.querySelectorAll('.sp-order-search-grid input')) : [];
+  const refreshButton = panel?.querySelector('#sp-order-refresh');
+  const clearButton = panel?.querySelector('#sp-order-clear');
+  if (!sessionBox) return;
+
+  if (hasAuthSession()) {
+    sessionBox.innerHTML = `
+      <div class="sp-order-session__copy">
+        <span>Conta do Hub</span>
+        <strong>${escapeHtml(auth.user?.email || 'Conta conectada')}</strong>
+      </div>
+    `;
+  } else {
+    sessionBox.innerHTML = `
+      <div class="sp-order-session__copy">
+        <span>Conta do Hub</span>
+        <strong>Login necessário</strong>
+      </div>
+      <button type="button" id="sp-order-open-auth" class="sp-order-link">Abrir login</button>
+    `;
+    sessionBox.querySelector('#sp-order-open-auth')?.addEventListener('click', () => openAuthPanel());
+  }
+
+  const disabled = !hasAuthSession();
+  if (quantityInput) quantityInput.disabled = disabled;
+  if (runButton) runButton.disabled = disabled;
+  if (refreshButton) refreshButton.disabled = disabled;
+  if (clearButton) clearButton.disabled = disabled || orderPickerHistoryCache.length === 0;
+  searchInputs.forEach((input) => { input.disabled = disabled; });
+}
+
+function buildOrderPickerHistoryItem(entry) {
+  const safeLogin = escapeHtml(entry.loginCliente);
+  const safeVenda = escapeHtml(entry.numeroVenda);
+  const safeDate = escapeHtml(formatOrderPickerDate(entry.selectedAt));
+  const safeUrl = escapeHtml(entry.url || getOrderDetailUrl(entry.numeroVenda));
+
+  return `
+    <article class="sp-order-history-item">
+      <div class="sp-order-history-item__head">
+        <div class="sp-order-history-item__identity">
+          <strong>${safeLogin}</strong>
+          <span class="sp-order-history-item__sale">Venda #${safeVenda}</span>
+        </div>
+        <div class="sp-order-history-item__actions">
+          <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" class="sp-order-action sp-order-action--open">Abrir</a>
+          <button type="button" class="sp-order-action sp-order-action--delete" data-order-history-delete="${escapeHtml(entry.id)}">Excluir</button>
+        </div>
+      </div>
+      <p class="sp-order-history-item__meta">${safeDate}</p>
+    </article>
+  `;
+}
+
+function buildOrderPickerHistoryGroup(group) {
+  return `
+    <section class="sp-order-history-group">
+      <div class="sp-order-history-group__header">
+        <strong>${escapeHtml(group.label)}</strong>
+        <span>${group.entries.length}</span>
+      </div>
+      <div class="sp-order-history-group__list">
+        ${group.entries.map(buildOrderPickerHistoryItem).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function renderOrderPickerDashboard(panel = document.getElementById('sp-order-panel')) {
+  if (!panel) return;
+
+  const metrics = panel.querySelector('#sp-order-metrics');
+  const historyTitle = panel.querySelector('#sp-order-history-title');
+  const searchLoginInput = panel.querySelector('#sp-order-search-login');
+  const searchSaleInput = panel.querySelector('#sp-order-search-sale');
+  const searchResult = panel.querySelector('#sp-order-search-result');
+  const historyList = panel.querySelector('#sp-order-history-list');
+  const clearButton = panel.querySelector('#sp-order-clear');
+
+  if (!metrics || !searchResult || !historyList) return;
+
+  renderOrderPickerSessionState(panel);
+
+  const summary = getOrderPickerSummary(orderPickerHistoryCache);
+  metrics.innerHTML = summary.map((item) => `
+    <article class="sp-order-metric">
+      <span>${item.label}</span>
+      <strong>${item.total}</strong>
+      <small>vendas únicas</small>
+    </article>
+  `).join('');
+
+  if (historyTitle) {
+    historyTitle.textContent = 'Histórico de pedidos';
+  }
+  if (clearButton) {
+    clearButton.disabled = !hasAuthSession() || orderPickerHistoryCache.length === 0;
+  }
+
+  if (!hasAuthSession()) {
+    searchResult.dataset.tone = 'warning';
+    searchResult.innerHTML = '<p>Faça login no Hub para listar, buscar e excluir o histórico remoto.</p>';
+    historyList.innerHTML = '<p class="sp-order-empty">Sem sessão ativa.</p>';
+    return;
+  }
+
+  if (orderPickerHistoryLoading && !orderPickerHistoryCache.length) {
+    searchResult.dataset.tone = 'info';
+    searchResult.innerHTML = '<p>Carregando histórico...</p>';
+    historyList.innerHTML = '<p class="sp-order-empty">Buscando registros no Supabase.</p>';
+    return;
+  }
+
+  const loginTerm = String(searchLoginInput?.value || '').trim();
+  const saleTerm = String(searchSaleInput?.value || '').trim();
+  const hasFilter = Boolean(loginTerm || saleTerm);
+  const matches = getOrderPickerSearchMatches(orderPickerHistoryCache, loginTerm, saleTerm);
+
+  if (!hasFilter) {
+    searchResult.dataset.tone = 'info';
+    searchResult.innerHTML = '<p>Busque pelo login do comprador e/ou pelo número da venda.</p>';
+  } else if (matches.length > 0) {
+    searchResult.dataset.tone = 'success';
+    searchResult.innerHTML = `<p>${matches.length} registro(s) encontrado(s) para o filtro informado.</p>`;
+  } else {
+    searchResult.dataset.tone = 'error';
+    searchResult.innerHTML = '<p>Nenhum registro encontrado para esse filtro.</p>';
+  }
+
+  const visibleEntries = (hasFilter ? matches : orderPickerHistoryCache).slice(0, 40);
+  const groups = getOrderPickerHistoryGroups(visibleEntries);
+  historyList.innerHTML = groups.length
+    ? groups.map(buildOrderPickerHistoryGroup).join('')
+    : '<p class="sp-order-empty">Nenhum pedido registrado ainda.</p>';
+}
+
+async function refreshOrderPickerDashboard(panel = document.getElementById('sp-order-panel'), force = false) {
+  if (!panel) return;
+
+  if (hasAuthSession()) {
+    try {
+      await loadOrderPickerHistory(force);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setOrderPickerStatus(message, 'error');
+      const searchResult = panel.querySelector('#sp-order-search-result');
+      if (searchResult) {
+        searchResult.dataset.tone = 'error';
+        searchResult.innerHTML = `<p>${escapeHtml(message)}</p>`;
+      }
+    }
+  } else {
+    orderPickerHistoryCache = [];
+    orderPickerHistoryLoaded = true;
+    orderPickerHistoryLoading = false;
+  }
+
+  renderOrderPickerDashboard(panel);
 }
 
 async function loadOrderPickerQuantity(input) {
@@ -2929,12 +3437,41 @@ function createOrderPickerPanel() {
       <strong>Pegador de Pedidos</strong>
       <button type="button" id="sp-order-close" class="sp-order-close" aria-label="Fechar">x</button>
     </div>
-    <label class="sp-order-field">
-      <span>Quantidade de pedidos</span>
-      <input id="sp-order-quantity" type="number" min="1" step="1" value="1" />
-    </label>
-    <button type="button" id="sp-order-run" class="sp-order-run">Selecionar e abrir</button>
-    <p id="sp-order-status" class="sp-order-status" data-tone="info"></p>
+    <div id="sp-order-session" class="sp-order-session"></div>
+    <div class="sp-order-tabs" role="tablist" aria-label="Modos do pegador de pedidos">
+      <button type="button" class="sp-order-tab is-active" data-view="picker" aria-selected="true">Coleta</button>
+      <button type="button" class="sp-order-tab" data-view="history" aria-selected="false">Painel</button>
+    </div>
+    <div class="sp-order-view is-active" data-view="picker">
+      <label class="sp-order-field">
+        <span>Quantidade de pedidos</span>
+        <input id="sp-order-quantity" type="number" min="1" step="1" value="1" />
+      </label>
+      <button type="button" id="sp-order-run" class="sp-order-run">Selecionar e abrir</button>
+      <p id="sp-order-status" class="sp-order-status" data-tone="info"></p>
+    </div>
+    <div class="sp-order-view" data-view="history">
+      <div id="sp-order-metrics" class="sp-order-metrics"></div>
+      <div class="sp-order-search-grid">
+        <label class="sp-order-field">
+          <span>Buscar por login</span>
+          <input id="sp-order-search-login" type="search" placeholder="Ex.: cliente123" />
+        </label>
+        <label class="sp-order-field">
+          <span>Buscar por venda</span>
+          <input id="sp-order-search-sale" type="search" placeholder="Ex.: 2000001234567890" />
+        </label>
+      </div>
+      <div id="sp-order-search-result" class="sp-order-search-result" data-tone="info"></div>
+      <div class="sp-order-history-head">
+        <strong id="sp-order-history-title">Histórico de pedidos</strong>
+        <div class="sp-order-history-actions">
+          <button type="button" id="sp-order-refresh" class="sp-order-link">Atualizar</button>
+          <button type="button" id="sp-order-clear" class="sp-order-link sp-order-link--danger">Limpar tudo</button>
+        </div>
+      </div>
+      <div id="sp-order-history-list" class="sp-order-history-list"></div>
+    </div>
   `;
 
   document.body.appendChild(panel);
@@ -2942,9 +3479,17 @@ function createOrderPickerPanel() {
   const quantityInput = panel.querySelector('#sp-order-quantity');
   const runButton = panel.querySelector('#sp-order-run');
   const closeButton = panel.querySelector('#sp-order-close');
+  const refreshButton = panel.querySelector('#sp-order-refresh');
+  const clearButton = panel.querySelector('#sp-order-clear');
+  const historyList = panel.querySelector('#sp-order-history-list');
 
   loadOrderPickerQuantity(quantityInput);
+  renderOrderPickerSessionState(panel);
+  void refreshOrderPickerDashboard(panel, true);
   runButton.addEventListener('click', runOrderPicker);
+  panel.querySelectorAll('.sp-order-tab').forEach((button) => {
+    button.addEventListener('click', () => setOrderPickerView(button.dataset.view, panel));
+  });
   quantityInput.addEventListener('keydown', (event) => {
     if (/^\d$/.test(event.key) && quantityInput.dataset.autoClear !== 'false') {
       quantityInput.value = '';
@@ -2961,6 +3506,48 @@ function createOrderPickerPanel() {
       quantityInput.dataset.autoClear = 'false';
     }
   });
+  panel.querySelectorAll('.sp-order-search-grid input').forEach((input) => {
+    input.addEventListener('input', () => renderOrderPickerDashboard(panel));
+  });
+  refreshButton.addEventListener('click', () => {
+    void refreshOrderPickerDashboard(panel, true);
+  });
+  clearButton.addEventListener('click', async () => {
+    if (!hasAuthSession()) {
+      setOrderPickerStatus('Faça login no Hub para limpar o histórico.', 'error');
+      return;
+    }
+    if (!orderPickerHistoryCache.length) return;
+    if (!window.confirm('Deseja excluir todo o histórico do painel?')) return;
+
+    try {
+      await clearOrderPickerHistory();
+      renderOrderPickerDashboard(panel);
+      setOrderPickerStatus('Histórico removido com sucesso.', 'success');
+      mostrarNotificacao('Histórico do painel removido.');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setOrderPickerStatus(message, 'error');
+      mostrarNotificacao(message, 'error');
+    }
+  });
+  historyList.addEventListener('click', async (event) => {
+    const deleteButton = event.target.closest('[data-order-history-delete]');
+    if (!deleteButton) return;
+
+    const recordId = deleteButton.getAttribute('data-order-history-delete') || '';
+    if (!recordId || !window.confirm('Excluir este registro do histórico?')) return;
+
+    try {
+      await deleteOrderPickerHistoryEntry(recordId);
+      renderOrderPickerDashboard(panel);
+      setOrderPickerStatus('Registro removido do histórico.', 'success');
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setOrderPickerStatus(message, 'error');
+      mostrarNotificacao(message, 'error');
+    }
+  });
   closeButton.addEventListener('click', closeOrderPickerPanel);
 
   return panel;
@@ -2971,18 +3558,24 @@ function openOrderPickerPanel() {
   applyHubTheme(panel);
   panel.classList.add('visible');
   document.getElementById('sp-btn-orders')?.classList.add('sp-active');
+  renderOrderPickerSessionState(panel);
+  setOrderPickerView(orderPickerCurrentView, panel);
+  void refreshOrderPickerDashboard(panel);
 
   if (!isOrderPickerSupportedPage()) {
     setOrderPickerStatus('Abra a tela de Vendas do Mercado Livre para usar este modulo.', 'error');
-    return;
+  } else if (!hasAuthSession()) {
+    setOrderPickerStatus('Faça login no Hub para registrar os pedidos no painel.', 'error');
+  } else {
+    setOrderPickerStatus('Defina a quantidade e execute a coleta.', 'info');
   }
-
-  setOrderPickerStatus('Defina a quantidade e execute a coleta.', 'info');
   const quantityInput = panel.querySelector('#sp-order-quantity');
   if (quantityInput) {
     quantityInput.dataset.autoClear = quantityInput.value ? 'true' : 'false';
-    quantityInput.focus();
-    quantityInput.select();
+    if (orderPickerCurrentView === 'picker' && hasAuthSession()) {
+      quantityInput.focus();
+      quantityInput.select();
+    }
   }
 }
 
@@ -3005,6 +3598,12 @@ async function runOrderPicker() {
   const quantityInput = panel.querySelector('#sp-order-quantity');
   const runButton = panel.querySelector('#sp-order-run');
   const requestedQuantity = Number(quantityInput?.value);
+
+  if (!hasAuthSession()) {
+    setOrderPickerStatus('Faça login no Hub para registrar os pedidos no painel.', 'error');
+    openAuthPanel();
+    return;
+  }
 
   if (!isOrderPickerSupportedPage()) {
     setOrderPickerStatus('Abra a tela de Vendas do Mercado Livre para usar este modulo.', 'error');
@@ -3040,11 +3639,16 @@ async function runOrderPicker() {
       throw new Error(openResult?.error || 'Falha ao abrir os pedidos.');
     }
 
-    const processedOrders = result.selectedOrders.map((order) => order.orderId).join(', ');
+    await saveOrderPickerHistoryEntries(result.selectedOrders);
+    renderOrderPickerDashboard(panel);
+
+    const processedOrders = result.selectedOrders.map((order) => order.numeroVenda).join(', ');
+    const processedLogins = [...new Set(result.selectedOrders.map((order) => order.loginCliente).filter(Boolean))].slice(0, 5).join(', ');
     setOrderPickerStatus(
       `Selecionados: ${result.selectedOrders.length}\n` +
       `Abas abertas: ${openResult.opened || 0}\n` +
-      `Pedidos: ${processedOrders || '-'}`,
+      `Logins: ${processedLogins || 'Sem login identificado'}\n` +
+      `Vendas: ${processedOrders || '-'}`,
       'success'
     );
 
@@ -4053,6 +4657,8 @@ document.addEventListener('sp:auth-changed', async () => {
       await initializePassoLargoForSession();
       await loadGestorLocalState();
       await loadGestorPendencias();
+      orderPickerHistoryLoaded = false;
+      await loadOrderPickerHistory(true);
       if (document.getElementById('mr-panel')) {
         refreshPanel();
       }
@@ -4067,8 +4673,16 @@ document.addEventListener('sp:auth-changed', async () => {
       gestorCopiedIds = new Set();
       gestorArchivedIds = new Set();
       gestorFefrelloSentIds = new Set();
+      orderPickerHistoryCache = [];
+      orderPickerHistoryLoaded = false;
+      orderPickerHistoryLoading = false;
       syncGestorButton();
       renderGestorPanelContent(document.getElementById('sp-gestor-panel'));
+    }
+
+    if (document.getElementById('sp-order-panel')) {
+      renderOrderPickerSessionState(document.getElementById('sp-order-panel'));
+      renderOrderPickerDashboard(document.getElementById('sp-order-panel'));
     }
   } catch (error) {
     console.warn('[Sentinela Pro] Falha ao atualizar dados do Passo Largo apos login:', error instanceof Error ? error.message : error);
