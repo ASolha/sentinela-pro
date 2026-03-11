@@ -212,22 +212,19 @@ function getGestorPageText() {
   return document.body?.innerText || '';
 }
 
+function getGestorLoginFromPage(pageText = '') {
+  const loginCapturado = capturarLoginDoHTML();
+  if (loginCapturado) return loginCapturado;
+
+  const match = String(pageText || '').match(/([^\s|]+(?:\s+[^\s|]+)*)\s*\|\s*CPF\s*\d+/);
+  return match ? match[1].trim() : '';
+}
+
 function captureGestorPageData() {
   const url = window.location.href;
   const pageText = getGestorPageText();
   const pageLines = pageText.split('\n');
-
-  let loginCliente = '';
-  const loginNode = document.querySelector('div.sc-title-subtitle-action__container p.sc-text');
-  if (loginNode) {
-    const text = loginNode.textContent || loginNode.innerText || '';
-    const match = text.match(/^([^|]+?)\s*\|\s*CPF/);
-    loginCliente = match ? match[1].trim() : text.trim();
-  }
-  if (!loginCliente) {
-    const match = pageText.match(/([^\s|]+(?:\s+[^\s|]+)*)\s*\|\s*CPF\s*\d+/);
-    loginCliente = match ? match[1].trim() : '';
-  }
+  const loginCliente = getGestorLoginFromPage(pageText);
 
   let numeroVenda = '';
   const vendaMatch = pageText.match(/Venda\s*#\s*(\d+)/i);
@@ -260,6 +257,47 @@ function captureGestorPageData() {
     break;
   }
 
+  function findGestorLineIndexByOccurrence(fragment, occurrence = 0) {
+    let count = 0;
+    for (let i = 0; i < pageLines.length; i += 1) {
+      if (!pageLines[i].includes(fragment)) continue;
+      if (count === occurrence) return i;
+      count += 1;
+    }
+    return -1;
+  }
+
+  function hasGestorComPedraNearby(index, fallbackText = '') {
+    if (/com\s+pedra/i.test(fallbackText)) return true;
+    if (index >= 0) {
+      for (let j = Math.max(0, index - 3); j <= Math.min(pageLines.length - 1, index + 3); j += 1) {
+        if (/com\s+pedra/i.test(pageLines[j])) return true;
+      }
+    }
+    return false;
+  }
+
+  function extractGestorModeloNearby(index) {
+    if (index < 0) return '';
+    for (let j = Math.max(0, index - 3); j <= Math.min(pageLines.length - 1, index + 3); j += 1) {
+      const candidateLine = pageLines[j];
+      for (const pattern of modeloPatterns) {
+        const modelMatch = candidateLine.match(pattern);
+        if (!modelMatch) continue;
+        let candidate = modelMatch[1].replace(/\*\*/g, '').trim();
+        candidate = candidate.replace(/\s+(Banhad[ao]|Folhead[ao]).*$/i, '').trim();
+        if (!candidate || GESTOR_IGNORE_MODEL_TERMS.some((rule) => rule.test(candidate))) continue;
+        return candidate;
+      }
+    }
+    return '';
+  }
+
+  function extractGestorCoupleAroText(label) {
+    const match = pageText.match(new RegExp(`${label}\\s*[-\\u2013]\\s*([^\\n|]+)`, 'i'));
+    return match ? match[1].trim() : '';
+  }
+
   const aroCaptures = [];
   const aroMatches = pageText.match(/Aro\s*-\s*([^\n|]+)/g);
   if (aroMatches?.length) {
@@ -267,40 +305,9 @@ function captureGestorPageData() {
       const text = match.replace(/Aro\s*-\s*/i, '').trim();
       const numberMatch = text.match(/(\d+(?:[.,]\d+)?)/);
       const numero = numberMatch ? numberMatch[1] : '';
-      let comPedra = '';
-      if (/com\s+pedra/i.test(text)) {
-        comPedra = ' com pedra';
-      } else {
-        for (let i = 0; i < pageLines.length; i += 1) {
-          if (!pageLines[i].includes(match)) continue;
-          for (let j = Math.max(0, i - 3); j <= Math.min(pageLines.length - 1, i + 3); j += 1) {
-            if (/com\s+pedra/i.test(pageLines[j])) {
-              comPedra = ' com pedra';
-              break;
-            }
-          }
-          break;
-        }
-      }
-
-      let modeloAro = '';
-      for (let i = 0; i < pageLines.length; i += 1) {
-        if (!pageLines[i].includes(match)) continue;
-        for (let j = Math.max(0, i - 3); j <= Math.min(pageLines.length - 1, i + 3); j += 1) {
-          const candidateLine = pageLines[j];
-          for (const pattern of modeloPatterns) {
-            const modelMatch = candidateLine.match(pattern);
-            if (!modelMatch) continue;
-            let candidate = modelMatch[1].replace(/\*\*/g, '').trim();
-            candidate = candidate.replace(/\s+(Banhad[ao]|Folhead[ao]).*$/i, '').trim();
-            if (!candidate || GESTOR_IGNORE_MODEL_TERMS.some((rule) => rule.test(candidate))) continue;
-            modeloAro = candidate;
-            break;
-          }
-          if (modeloAro) break;
-        }
-        break;
-      }
+      const matchIndex = findGestorLineIndexByOccurrence(match, index);
+      const comPedra = hasGestorComPedraNearby(matchIndex, text) ? ' com pedra' : '';
+      const modeloAro = extractGestorModeloNearby(matchIndex) || modelo;
 
       aroCaptures.push({
         label: `Avulso ${index + 1}`,
@@ -309,22 +316,20 @@ function captureGestorPageData() {
       });
     });
   } else {
-    const masculinoMatch = pageText.match(/Masculino\s*[-\u2013]\s*([^\n|]+)/);
+    const textoAroMasculino = extractGestorCoupleAroText('Masculino');
     let aroMasculino = '';
-    if (masculinoMatch) {
-      const text = masculinoMatch[1].trim();
-      const numberMatch = text.match(/(\d+(?:[.,]\d+)?)/);
-      const numero = numberMatch ? numberMatch[1] : text;
-      aroMasculino = (numero + (/com\s+pedra/i.test(text) ? ' com pedra' : '')).trim();
+    if (textoAroMasculino) {
+      const numberMatch = textoAroMasculino.match(/(\d+(?:[.,]\d+)?)/);
+      const numero = numberMatch ? numberMatch[1] : textoAroMasculino;
+      aroMasculino = (numero + (/com\s+pedra/i.test(textoAroMasculino) ? ' com pedra' : '')).trim();
     }
 
-    const femininoMatch = pageText.match(/Feminino\s*[-\u2013]\s*([^\n|]+)/);
+    const textoAroFeminino = extractGestorCoupleAroText('Feminino');
     let aroFeminino = '';
-    if (femininoMatch) {
-      const text = femininoMatch[1].trim();
-      const numberMatch = text.match(/(\d+(?:[.,]\d+)?)/);
-      const numero = numberMatch ? numberMatch[1] : text;
-      aroFeminino = (numero + (/com\s+pedra/i.test(text) ? ' com pedra' : '')).trim();
+    if (textoAroFeminino) {
+      const numberMatch = textoAroFeminino.match(/(\d+(?:[.,]\d+)?)/);
+      const numero = numberMatch ? numberMatch[1] : textoAroFeminino;
+      aroFeminino = (numero + (/com\s+pedra/i.test(textoAroFeminino) ? ' com pedra' : '')).trim();
     }
 
     if (aroMasculino || aroFeminino) {
@@ -342,14 +347,22 @@ function captureGestorPageData() {
   };
 }
 
+function hasGestorCapturedMeaningfulData(data) {
+  return Boolean(data && (data.login_cliente || data.numero_venda || data.modelo || parseGestorAros(data.aro).length));
+}
+
 function getGestorCapturedPageData(force = false) {
-  if (!force && gestorCapturedData && gestorLastCaptureUrl === window.location.href) {
+  if (!force && gestorCapturedData && gestorLastCaptureUrl === window.location.href && gestorCapturedData.login_cliente) {
     return gestorCapturedData;
   }
 
-  gestorCapturedData = captureGestorPageData();
-  gestorLastCaptureUrl = window.location.href;
-  return gestorCapturedData;
+  const captured = captureGestorPageData();
+  if (hasGestorCapturedMeaningfulData(captured) || force || !gestorCapturedData || gestorLastCaptureUrl !== window.location.href) {
+    gestorCapturedData = captured;
+    gestorLastCaptureUrl = window.location.href;
+  }
+
+  return gestorCapturedData || captured;
 }
 
 function fillGestorForm(panel, force = false) {
@@ -4244,13 +4257,7 @@ function capturarDados() {
   }
 
   function extractCoupleAroText(label) {
-    const lineData = findLineByRegex(new RegExp(`${label}\\s*-\\s*`, 'i'));
-    if (!lineData.text) return '';
-
-    const segments = lineData.text.split('|').map((segment) => segment.trim());
-    const labelRegex = new RegExp(`${label}\\s*-\\s*([^|\\n]+)`, 'i');
-    const segment = segments.find((item) => labelRegex.test(item)) || lineData.text;
-    const match = segment.match(labelRegex);
+    const match = textoCompleto.match(new RegExp(`${label}\\s*-\\s*([^\\n|]+)`, 'i'));
     return match ? match[1].trim() : '';
   }
 
@@ -4491,25 +4498,24 @@ function clipShouldReplaceStoredData(existingData, nextData) {
 
 function getClipStorageValue() {
   return new Promise((resolve) => {
-    chrome.storage.local.get([SESSION_STORAGE_KEY], (result) => {
-      if (chrome.runtime?.lastError) {
-        console.error('Erro ao carregar dados do clip:', chrome.runtime.lastError);
-        resolve(clipEmptyData());
-        return;
-      }
-      resolve(normalizeClipStoredData(result?.[SESSION_STORAGE_KEY]));
-    });
+    try {
+      const dadosSalvos = sessionStorage.getItem(SESSION_STORAGE_KEY);
+      resolve(normalizeClipStoredData(dadosSalvos ? JSON.parse(dadosSalvos) : null));
+    } catch (e) {
+      console.error('Erro ao carregar dados do clip:', e);
+      resolve(clipEmptyData());
+    }
   });
 }
 
 function setClipStorageValue(dados) {
   return new Promise((resolve) => {
-    chrome.storage.local.set({ [SESSION_STORAGE_KEY]: dados }, () => {
-      if (chrome.runtime?.lastError) {
-        console.error('Erro ao salvar dados do clip:', chrome.runtime.lastError);
-      }
-      resolve();
-    });
+    try {
+      sessionStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(dados));
+    } catch (e) {
+      console.error('Erro ao salvar dados do clip:', e);
+    }
+    resolve();
   });
 }
 
@@ -4523,7 +4529,8 @@ async function salvarDadosClip(dados, options = {}) {
   });
 
   const dadosExistentes = await carregarDadosClip();
-  const dadosParaSalvar = (!force && !clipShouldReplaceStoredData(dadosExistentes, normalizedIncoming))
+  const deveManterExistente = !force && clipHasMeaningfulData(dadosExistentes) && !clipHasMeaningfulData(normalizedIncoming);
+  const dadosParaSalvar = deveManterExistente
     ? { ...dadosExistentes, url: normalizedIncoming.url || dadosExistentes.url }
     : normalizedIncoming;
 
@@ -4559,12 +4566,12 @@ async function carregarDadosClip() {
 
 async function limparDadosSalvosClip() {
   return new Promise((resolve) => {
-    chrome.storage.local.remove(SESSION_STORAGE_KEY, () => {
-      if (chrome.runtime?.lastError) {
-        console.error('Erro ao limpar dados do clip:', chrome.runtime.lastError);
-      }
-      resolve();
-    });
+    try {
+      sessionStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch (e) {
+      console.error('Erro ao limpar dados do clip:', e);
+    }
+    resolve();
   });
 }
 
@@ -5193,25 +5200,12 @@ function monitorarMudancasURL() {
     const novaURL = window.location.href;
     if (novaURL !== urlAtual) {
       urlAtual = novaURL;
-      const dadosPagina = capturarDados();
-      if (clipHasMeaningfulData(dadosPagina)) {
-        const dadosAntes = await carregarDadosClip();
-        const dadosSalvos = await salvarDadosClip(dadosPagina);
-        if (clipShouldReplaceStoredData(dadosAntes, dadosPagina)) {
-          console.log('[Sentinela Pro] Dados recapturados automaticamente:', novaURL);
-          mostrarNotificacaoURL('Dados recapturados');
-        } else if (dadosSalvos.url === novaURL) {
+      const dadosExistentes = await carregarDadosClip();
+      if (clipHasMeaningfulData(dadosExistentes)) {
+        const foiAtualizado = await atualizarApenasURLClip(novaURL);
+        if (foiAtualizado) {
           console.log('[Sentinela Pro] URL atualizado automaticamente:', novaURL);
           mostrarNotificacaoURL('URL atualizado');
-        }
-      } else {
-        const dadosExistentes = await carregarDadosClip();
-        if (clipHasMeaningfulData(dadosExistentes)) {
-          const foiAtualizado = await atualizarApenasURLClip(novaURL);
-          if (foiAtualizado) {
-            console.log('[Sentinela Pro] URL atualizado automaticamente:', novaURL);
-            mostrarNotificacaoURL('URL atualizado');
-          }
         }
       }
     }
@@ -5225,13 +5219,13 @@ if (window.location.hostname.includes('mercadolivre.com.br') || window.location.
   window.addEventListener('load', async () => {
     monitorarMudancasURL();
     const dadosJaSalvos = await carregarDadosClip();
-    if (clipNeedsFreshCapture(dadosJaSalvos)) {
+    if (!dadosJaSalvos.url) {
       const dadosPagina = capturarDados();
       if (clipHasMeaningfulData(dadosPagina)) {
         await salvarDadosClip(dadosPagina);
       }
-    } else {
-      if (dadosJaSalvos.url !== window.location.href) await atualizarApenasURLClip(window.location.href);
+    } else if (dadosJaSalvos.url !== window.location.href) {
+      await atualizarApenasURLClip(window.location.href);
     }
   });
 }
