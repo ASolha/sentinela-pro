@@ -659,64 +659,141 @@ function formatGestorCardForFefrello(pendencia) {
   return lines.join('\n');
 }
 
-function loadGestorEmailSettings() {
+function getGestorStorageArea(areaName) {
+  return chrome.storage?.[areaName] || chrome.storage.local;
+}
+
+function getGestorScopedStorage(key, areaName = 'local') {
   return new Promise((resolve) => {
-    chrome.storage.local.get([GESTOR_EMAIL_SETTINGS_KEY], (result) => {
-      const scoped = result?.[GESTOR_EMAIL_SETTINGS_KEY] || {};
-      const userId = getGestorScopedUserId();
-      resolve(normalizeGestorEmailSettings(userId ? scoped[userId] : null));
-    });
+    getGestorStorageArea(areaName).get([key], (result) => resolve(result?.[key] || {}));
   });
 }
 
-function saveGestorEmailSettings(settings) {
+function setGestorScopedStorage(key, value, areaName = 'local') {
   return new Promise((resolve) => {
-    chrome.storage.local.get([GESTOR_EMAIL_SETTINGS_KEY], (result) => {
-      const scoped = result?.[GESTOR_EMAIL_SETTINGS_KEY] || {};
-      const userId = getGestorScopedUserId();
-      if (!userId) {
-        resolve();
-        return;
+    getGestorStorageArea(areaName).set({ [key]: value }, () => {
+      if (chrome.runtime?.lastError) {
+        console.warn(`[Sentinela Pro] Falha ao salvar ${key} em chrome.storage.${areaName}:`, chrome.runtime.lastError.message);
       }
-      scoped[userId] = normalizeGestorEmailSettings(settings);
-      chrome.storage.local.set({ [GESTOR_EMAIL_SETTINGS_KEY]: scoped }, resolve);
-    });
-  });
-}
-
-function loadGestorCardStatus() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get([GESTOR_CARD_STATUS_KEY], (result) => {
-      const scoped = result?.[GESTOR_CARD_STATUS_KEY] || {};
-      const userId = getGestorScopedUserId();
-      const data = userId ? (scoped[userId] || {}) : {};
-      gestorEmailSentIds = new Set(Array.isArray(data.emailSentIds) ? data.emailSentIds.map(String) : []);
-      gestorCopiedIds = new Set(Array.isArray(data.copiedIds) ? data.copiedIds.map(String) : []);
-      gestorArchivedIds = new Set(Array.isArray(data.archivedIds) ? data.archivedIds.map(String) : []);
-      gestorFefrelloSentIds = new Set(Array.isArray(data.fefrelloSentIds) ? data.fefrelloSentIds.map(String) : []);
       resolve();
     });
   });
 }
 
-function saveGestorCardStatus() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get([GESTOR_CARD_STATUS_KEY], (result) => {
-      const scoped = result?.[GESTOR_CARD_STATUS_KEY] || {};
-      const userId = getGestorScopedUserId();
-      if (!userId) {
-        resolve();
-        return;
-      }
-      scoped[userId] = {
-        emailSentIds: [...gestorEmailSentIds],
-        copiedIds: [...gestorCopiedIds],
-        archivedIds: [...gestorArchivedIds],
-        fefrelloSentIds: [...gestorFefrelloSentIds]
-      };
-      chrome.storage.local.set({ [GESTOR_CARD_STATUS_KEY]: scoped }, resolve);
-    });
-  });
+function normalizeGestorCardStatusData(data) {
+  return {
+    emailSentIds: Array.isArray(data?.emailSentIds) ? data.emailSentIds.map(String) : [],
+    copiedIds: Array.isArray(data?.copiedIds) ? data.copiedIds.map(String) : [],
+    archivedIds: Array.isArray(data?.archivedIds) ? data.archivedIds.map(String) : [],
+    fefrelloSentIds: Array.isArray(data?.fefrelloSentIds) ? data.fefrelloSentIds.map(String) : []
+  };
+}
+
+async function loadGestorEmailSettings() {
+  const userId = getGestorScopedUserId();
+  if (!userId) return normalizeGestorEmailSettings(null);
+
+  const [syncScoped, localScoped] = await Promise.all([
+    getGestorScopedStorage(GESTOR_EMAIL_SETTINGS_KEY, 'sync'),
+    getGestorScopedStorage(GESTOR_EMAIL_SETTINGS_KEY, 'local')
+  ]);
+
+  const syncValue = syncScoped?.[userId] || null;
+  const localValue = localScoped?.[userId] || null;
+  const selected = syncValue || localValue || null;
+
+  if (selected) {
+    if (!syncValue) {
+      syncScoped[userId] = selected;
+      await setGestorScopedStorage(GESTOR_EMAIL_SETTINGS_KEY, syncScoped, 'sync');
+    }
+    if (!localValue) {
+      localScoped[userId] = selected;
+      await setGestorScopedStorage(GESTOR_EMAIL_SETTINGS_KEY, localScoped, 'local');
+    }
+  }
+
+  return normalizeGestorEmailSettings(selected);
+}
+
+async function saveGestorEmailSettings(settings) {
+  const userId = getGestorScopedUserId();
+  if (!userId) return;
+
+  const normalized = normalizeGestorEmailSettings(settings);
+  const [syncScoped, localScoped] = await Promise.all([
+    getGestorScopedStorage(GESTOR_EMAIL_SETTINGS_KEY, 'sync'),
+    getGestorScopedStorage(GESTOR_EMAIL_SETTINGS_KEY, 'local')
+  ]);
+
+  syncScoped[userId] = normalized;
+  localScoped[userId] = normalized;
+
+  await Promise.all([
+    setGestorScopedStorage(GESTOR_EMAIL_SETTINGS_KEY, syncScoped, 'sync'),
+    setGestorScopedStorage(GESTOR_EMAIL_SETTINGS_KEY, localScoped, 'local')
+  ]);
+}
+
+async function loadGestorCardStatus() {
+  const userId = getGestorScopedUserId();
+  if (!userId) {
+    gestorEmailSentIds = new Set();
+    gestorCopiedIds = new Set();
+    gestorArchivedIds = new Set();
+    gestorFefrelloSentIds = new Set();
+    return;
+  }
+
+  const [syncScoped, localScoped] = await Promise.all([
+    getGestorScopedStorage(GESTOR_CARD_STATUS_KEY, 'sync'),
+    getGestorScopedStorage(GESTOR_CARD_STATUS_KEY, 'local')
+  ]);
+
+  const syncValue = syncScoped?.[userId] || null;
+  const localValue = localScoped?.[userId] || null;
+  const selected = normalizeGestorCardStatusData(syncValue || localValue || {});
+
+  if (syncValue || localValue) {
+    if (!syncValue) {
+      syncScoped[userId] = selected;
+      await setGestorScopedStorage(GESTOR_CARD_STATUS_KEY, syncScoped, 'sync');
+    }
+    if (!localValue) {
+      localScoped[userId] = selected;
+      await setGestorScopedStorage(GESTOR_CARD_STATUS_KEY, localScoped, 'local');
+    }
+  }
+
+  gestorEmailSentIds = new Set(selected.emailSentIds);
+  gestorCopiedIds = new Set(selected.copiedIds);
+  gestorArchivedIds = new Set(selected.archivedIds);
+  gestorFefrelloSentIds = new Set(selected.fefrelloSentIds);
+}
+
+async function saveGestorCardStatus() {
+  const userId = getGestorScopedUserId();
+  if (!userId) return;
+
+  const nextStatus = {
+    emailSentIds: [...gestorEmailSentIds],
+    copiedIds: [...gestorCopiedIds],
+    archivedIds: [...gestorArchivedIds],
+    fefrelloSentIds: [...gestorFefrelloSentIds]
+  };
+
+  const [syncScoped, localScoped] = await Promise.all([
+    getGestorScopedStorage(GESTOR_CARD_STATUS_KEY, 'sync'),
+    getGestorScopedStorage(GESTOR_CARD_STATUS_KEY, 'local')
+  ]);
+
+  syncScoped[userId] = nextStatus;
+  localScoped[userId] = nextStatus;
+
+  await Promise.all([
+    setGestorScopedStorage(GESTOR_CARD_STATUS_KEY, syncScoped, 'sync'),
+    setGestorScopedStorage(GESTOR_CARD_STATUS_KEY, localScoped, 'local')
+  ]);
 }
 
 async function loadGestorLocalState() {
@@ -881,6 +958,7 @@ function createTopBar() {
   if (document.getElementById('sp-topbar')) return;
   const bar = document.createElement('div');
   bar.id = 'sp-topbar';
+  applyHubTheme(bar);
 
   const iconPasso = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
     <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
@@ -1108,6 +1186,7 @@ function renderTopBarLayout(bar, order = HUB_DEFAULT_BUTTON_ORDER) {
     auth: { id: 'sp-btn-auth', label: 'Conta' },
   };
 
+  defs.counter.label = 'N.º Páginas';
   const normalizedOrder = normalizeTopBarOrder(order);
   const buttons = {};
   Object.values(defs).forEach((def) => {
@@ -1202,6 +1281,18 @@ function setAuthPanelStatus(message = '', tone = 'info') {
 }
 
 function renderAuthPanelContent(panel) {
+  const themeLabel = isDarkTheme ? 'Escuro' : 'Claro';
+  const themeAction = isDarkTheme ? 'Usar tema claro' : 'Usar tema escuro';
+  const themeMarkup = `
+      <div class="sp-auth-theme">
+        <div class="sp-auth-theme__copy">
+          <span class="sp-auth-theme__eyebrow">Tema da interface</span>
+          <strong>${themeLabel}</strong>
+          <p>Aplica em Passo Largo, Gestor, Pegador de Pedidos e Clip.</p>
+        </div>
+        <button type="button" id="sp-auth-theme-toggle" class="sp-auth-theme-toggle">${themeAction}</button>
+      </div>
+  `;
   panel.innerHTML = hasAuthSession()
     ? `
       <div class="sp-auth-panel__header">
@@ -1216,6 +1307,7 @@ function renderAuthPanelContent(panel) {
           <p>Sessão ativa neste navegador.</p>
         </div>
       </div>
+      ${themeMarkup}
       <button type="button" id="sp-auth-logout" class="sp-auth-run sp-auth-run--danger">Sair</button>
       <p id="sp-auth-status" class="sp-auth-status" data-tone="info"></p>
     `
@@ -1233,6 +1325,7 @@ function renderAuthPanelContent(panel) {
         <span>Senha</span>
         <input id="sp-auth-password" type="password" autocomplete="current-password" placeholder="Sua senha" />
       </label>
+      ${themeMarkup}
       <button type="button" id="sp-auth-login" class="sp-auth-run">Entrar</button>
       <p id="sp-auth-status" class="sp-auth-status" data-tone="info"></p>
     `;
@@ -1242,6 +1335,7 @@ function renderAuthPanelContent(panel) {
 
 function bindAuthPanelEvents(panel) {
   panel.querySelector('#sp-auth-close')?.addEventListener('click', closeAuthPanel);
+  panel.querySelector('#sp-auth-theme-toggle')?.addEventListener('click', () => setGlobalTheme(!isDarkTheme));
 
   if (hasAuthSession()) {
     panel.querySelector('#sp-auth-logout')?.addEventListener('click', onAuthLogout);
@@ -1269,6 +1363,7 @@ function createAuthPanel() {
 
   const panel = document.createElement('section');
   panel.id = 'sp-auth-panel';
+  applyHubTheme(panel);
   renderAuthPanelContent(panel);
   document.body.appendChild(panel);
   return panel;
@@ -1276,6 +1371,7 @@ function createAuthPanel() {
 
 function openAuthPanel() {
   const panel = createAuthPanel();
+  applyHubTheme(panel);
   panel.classList.add('visible');
   document.getElementById('sp-btn-auth')?.classList.add('sp-active');
   renderAuthPanelContent(panel);
@@ -1469,6 +1565,7 @@ function createGestorBatchModal() {
 
   const overlay = document.createElement('div');
   overlay.id = 'sp-gestor-batch-overlay';
+  applyHubTheme(overlay);
   overlay.innerHTML = `
     <div class="sp-gestor-batch-modal">
       <div class="sp-gestor-batch-modal__header">
@@ -1879,6 +1976,7 @@ function createGestorPanel() {
 
   const panel = document.createElement('section');
   panel.id = 'sp-gestor-panel';
+  applyHubTheme(panel);
   panel.addEventListener('click', (event) => event.stopPropagation());
   document.body.appendChild(panel);
   renderGestorPanelContent(panel);
@@ -1977,6 +2075,7 @@ function makeGestorPanelDraggable(panel) {
 async function openGestorPanel() {
   await loadGestorPanelPosition();
   const panel = createGestorPanel();
+  applyHubTheme(panel);
   positionGestorPanel(panel);
   panel.classList.add('visible');
   document.getElementById('sp-btn-gestor')?.classList.add('sp-active');
@@ -2808,6 +2907,7 @@ function createOrderPickerPanel() {
 
   const panel = document.createElement('section');
   panel.id = 'sp-order-panel';
+  applyHubTheme(panel);
   panel.innerHTML = `
     <div class="sp-order-panel__header">
       <strong>Pegador de Pedidos</strong>
@@ -2852,6 +2952,7 @@ function createOrderPickerPanel() {
 
 function openOrderPickerPanel() {
   const panel = createOrderPickerPanel();
+  applyHubTheme(panel);
   panel.classList.add('visible');
   document.getElementById('sp-btn-orders')?.classList.add('sp-active');
 
@@ -3345,6 +3446,63 @@ let passoLargoSyncInFlight = false;
 let passoLargoLastSyncedSignature = '';
 let panelSavedPos  = null;  // posição gravada do overlay arrastar
 
+const PASSO_THEME_VARS = ['--bg','--bg2','--bg3','--bghov','--txt','--txt2','--txt3','--border','--accent','--accenthov','--accentlt','--success','--danger','--dangerlt','--sh-sm','--sh-md','--sh-lg','--r-sm','--r-md','--r-lg','--r-full','--tr'];
+
+function getHubThemeClass() {
+  return isDarkTheme ? 'sp-theme-dark' : 'sp-theme-light';
+}
+
+function applyHubTheme(element, options = {}) {
+  if (!element) return element;
+
+  const { isClip = false } = options;
+  element.classList.remove('sp-theme-dark', 'sp-theme-light');
+  element.classList.add(getHubThemeClass());
+
+  if (isClip) {
+    element.classList.toggle('sp-clip-light', !isDarkTheme);
+  }
+
+  return element;
+}
+
+function syncHubTheme() {
+  applyHubTheme(document.getElementById('sp-topbar'));
+  applyHubTheme(document.getElementById('sp-auth-panel'));
+  applyHubTheme(document.getElementById('sp-gestor-panel'));
+  applyHubTheme(document.getElementById('sp-order-panel'));
+  applyHubTheme(document.getElementById('sp-gestor-batch-overlay'));
+  applyHubTheme(document.getElementById('extensao-popup-overlay'), { isClip: true });
+}
+
+function copyPassoThemeVars(target) {
+  const panel = document.getElementById('mr-panel');
+  if (!target || !panel) return;
+
+  const computed = getComputedStyle(panel);
+  PASSO_THEME_VARS.forEach((variable) => target.style.setProperty(variable, computed.getPropertyValue(variable)));
+}
+
+function setGlobalTheme(nextDark) {
+  isDarkTheme = Boolean(nextDark);
+  localStorage.setItem('mr-theme', isDarkTheme ? 'dark' : 'light');
+
+  document.getElementById('mr-panel')?.classList.toggle('dark', isDarkTheme);
+  document.getElementById('mr-settings')?.classList.toggle('dark', isDarkTheme);
+  copyPassoThemeVars(document.getElementById('mr-settings'));
+
+  syncHubTheme();
+  paintClipIconButton(document.getElementById('btn-coracao'), 'coracao');
+  paintClipIconButton(document.getElementById('btn-infinito'), 'infinito');
+  paintClipIconButton(document.getElementById('btn-formatar-tudo'), 'formatar');
+  paintClipIconButton(document.getElementById('btn-config-fefrello'), 'config', document.getElementById('view-config-fefrello')?.style.display === 'block');
+
+  const authPanel = document.getElementById('sp-auth-panel');
+  if (authPanel?.classList.contains('visible')) {
+    renderAuthPanelContent(authPanel);
+  }
+}
+
 const AVAILABLE_VARS = [
   '[NOME_CLIENTE]', '[NUMERO_PEDIDO]', '[PRAZO_ENTREGA]',
   '[DATA]', '[HORA]', '[VALOR]',
@@ -3582,14 +3740,15 @@ function buildPanel() {
   positionPanel(panel);
   makePanelDraggable(panel);
   panel.addEventListener('click', e => e.stopPropagation());
+  panel.querySelector('#mr-tt')?.remove();
   panel.querySelector('#mr-close-btn').onclick = hidePanel;
-  panel.querySelector('#mr-tt').onclick = () => { isDarkTheme = !isDarkTheme; panel.classList.toggle('dark', isDarkTheme); localStorage.setItem('mr-theme', isDarkTheme?'dark':'light'); };
   panel.querySelector('#mr-si').oninput = (e) => { searchQuery = e.target.value.trim(); renderCards(); };
   panel.querySelector('#mr-bnew').onclick      = () => openMessageModal(null, null);
   panel.querySelector('#mr-cat-btn').onclick   = openCatModal;
   panel.querySelector('#mr-settings-btn').onclick = openSettingsPanel;
   panel.querySelector('#mr-ie-btn').onclick    = openImportExportModal;
   renderCatTabs(); renderCards();
+  syncHubTheme();
 }
 
 function positionPanel(panel) {
@@ -3619,7 +3778,7 @@ function makePanelDraggable(panel) {
 
   handle.addEventListener('mousedown', (e) => {
     // ignora cliques em botões e no toggle de tema dentro do header
-    if (e.button !== 0 || e.target.closest('button, .mr-tt')) return;
+    if (e.button !== 0 || e.target.closest('button')) return;
     e.preventDefault();
     isDragging = true;
 
@@ -3712,7 +3871,7 @@ function togglePanel() { const p = document.getElementById('mr-panel'); if (!p||
 function createOverlay() {
   const ov = document.createElement('div'); ov.className = 'mr-ov'; ov.innerHTML = `<div class="mr-modal" id="mr-modal-inner"></div>`;
   const panel = document.getElementById('mr-panel');
-  if (panel) { const cs = getComputedStyle(panel); const vars = ['--bg','--bg2','--bg3','--bghov','--txt','--txt2','--txt3','--border','--accent','--accenthov','--accentlt','--success','--danger','--dangerlt','--sh-sm','--sh-md','--sh-lg','--r-sm','--r-md','--r-lg','--r-full','--tr']; const modal = ov.querySelector('.mr-modal'); vars.forEach(v => modal.style.setProperty(v, cs.getPropertyValue(v))); }
+  if (panel) copyPassoThemeVars(ov.querySelector('.mr-modal'));
   ov.onclick = e => { if (e.target===ov) closeOverlay(ov); }; ov.querySelector('.mr-modal').addEventListener('click', e => e.stopPropagation());
   document.body.appendChild(ov); setTimeout(() => ov.classList.add('active'), 10); return ov;
 }
@@ -3774,8 +3933,7 @@ function openSettingsPanel() {
   const sp=document.createElement('div'); sp.id='mr-settings'; if(isDarkTheme)sp.classList.add('dark');
   sp.innerHTML=`<div class="mst-hd"><span class="mst-title">⚙️ Configurações — Categorias & Mensagens</span><button class="mr-mc" id="mst-close">✕</button></div><div class="mst-body"><div class="mst-sidebar"><div class="mst-sidebar-hd"><span>Categorias</span><button class="mr-btn mr-bp" id="mst-add-cat" style="padding:2px 8px;font-size:10px">+ Nova</button></div><div class="mst-sidebar-list" id="mst-cat-list"></div></div><div class="mst-main" id="mst-main"><div class="mst-empty"><div class="mst-empty-icon">📂</div><div class="mst-empty-txt">Selecione uma categoria</div></div></div></div>`;
   sp.addEventListener('click', e=>e.stopPropagation()); document.body.appendChild(sp);
-  const panel=document.getElementById('mr-panel');
-  if(panel){const cs=getComputedStyle(panel);['--bg','--bg2','--bg3','--bghov','--txt','--txt2','--txt3','--border','--accent','--accenthov','--accentlt','--success','--danger','--dangerlt','--sh-sm','--sh-md','--sh-lg','--r-sm','--r-md','--r-lg','--r-full','--tr'].forEach(v=>sp.style.setProperty(v,cs.getPropertyValue(v)));}
+  copyPassoThemeVars(sp);
   sp.querySelector('#mst-close').onclick=closeSettings; sp.querySelector('#mst-add-cat').onclick=()=>{closeSettings();openCatModal();};
   setTimeout(()=>{backdrop.classList.add('visible');sp.classList.add('visible');},10);
   function renderSidebar(){
@@ -3946,6 +4104,76 @@ function capturarLoginDoHTML() {
   return loginMatch ? loginMatch[1].trim() : '';
 }
 
+function clipModelHasPedra(modelo) {
+  return /pedra/i.test(modelo || '');
+}
+
+function clipTextHasComPedra(texto) {
+  return /com\s+pedra/i.test(texto || '');
+}
+
+function clipShouldAppendComPedra({ tipo = '', index = -1, aroText = '', numeroAtual = '', modelo = '', fallbackModelo = '' }) {
+  const hasStoneOnAro = clipTextHasComPedra(aroText) || clipTextHasComPedra(numeroAtual);
+  const hasStoneOnModel = clipModelHasPedra(modelo) || clipModelHasPedra(fallbackModelo);
+
+  if (tipo === 'Masculino') return false;
+  if (tipo === 'Feminino') return hasStoneOnAro || hasStoneOnModel;
+  if (!tipo && index === 1) return hasStoneOnAro || hasStoneOnModel;
+  return hasStoneOnAro;
+}
+
+function clipRemoveComPedra(numero) {
+  const base = String(numero || '').replace(/\s+com\s+pedra\b/gi, '').trim();
+  if (!base) return base;
+  return base;
+}
+
+function clipSanitizeCapturedData(dados) {
+  if (!dados || typeof dados !== 'object') return dados;
+  return {
+    ...dados,
+    aros: Array.isArray(dados.aros)
+      ? dados.aros.map((aro) => (
+          aro?.tipo === 'Masculino'
+            ? { ...aro, numero: clipRemoveComPedra(aro.numero || '') }
+            : aro
+        ))
+      : []
+  };
+}
+
+function clipSanitizeMasculinoField() {
+  document.querySelectorAll('#extensao-popup-overlay input[id^="campo-aro-"]').forEach((input) => {
+    const box = input.closest('div[style*="margin-bottom:8px"]') || input.parentElement?.parentElement;
+    const badge = box?.querySelector('span');
+    const badgeText = (badge?.textContent || '').trim().toLowerCase();
+    if (!badgeText.includes('masculino')) return;
+
+    const cleanValue = clipRemoveComPedra(input.value);
+    if (input.value !== cleanValue) {
+      input.value = cleanValue;
+    }
+
+    if (input.dataset.masculinoSanitized === 'true') return;
+    input.dataset.masculinoSanitized = 'true';
+    input.addEventListener('input', () => {
+      const nextValue = clipRemoveComPedra(input.value);
+      if (input.value !== nextValue) {
+        input.value = nextValue;
+      }
+    });
+  });
+}
+
+function clipNeedsFreshCapture(dados, currentUrl = window.location.href) {
+  if (!dados || typeof dados !== 'object') return true;
+  if (!dados.url || dados.url !== currentUrl) return true;
+  if (!dados.login) return true;
+
+  const aros = Array.isArray(dados.aros) ? dados.aros : [];
+  return aros.some((aro) => aro?.tipo === 'Masculino' && clipTextHasComPedra(aro?.numero || ''));
+}
+
 function capturarDados() {
   const textoCompleto = document.body.innerText;
   const url = window.location.href;
@@ -3969,7 +4197,7 @@ function capturarDados() {
       break;
     }
   }
-  const modeloTemPedra = /pedra/i.test(modelo);
+  const modeloTemPedra = clipModelHasPedra(modelo);
 
   function findLineIndexByOccurrence(fragmento, ocorrencia = 0) {
     let count = 0;
@@ -3981,21 +4209,21 @@ function capturarDados() {
     return -1;
   }
 
-  function findLineIndexByRegex(regex) {
+  function findLineByRegex(regex) {
     for (let i = 0; i < linhas.length; i += 1) {
-      if (regex.test(linhas[i])) return i;
+      if (regex.test(linhas[i])) return { text: linhas[i], index: i };
     }
-    return -1;
+    return { text: '', index: -1 };
   }
 
   function hasComPedraNearby(index, fallbackText = '') {
-    if (/com\s+pedra/i.test(fallbackText)) return true;
+    if (clipTextHasComPedra(fallbackText)) return true;
     if (index >= 0) {
       for (let j = Math.max(0, index - 3); j <= Math.min(linhas.length - 1, index + 3); j += 1) {
-        if (/com\s+pedra/i.test(linhas[j])) return true;
+        if (clipTextHasComPedra(linhas[j])) return true;
       }
     }
-    return /com\s+pedra/i.test(modelo);
+    return false;
   }
 
   function extractModeloNearby(index) {
@@ -4013,6 +4241,17 @@ function capturarDados() {
     return '';
   }
 
+  function extractCoupleAroText(label) {
+    const lineData = findLineByRegex(new RegExp(`${label}\\s*-\\s*`, 'i'));
+    if (!lineData.text) return '';
+
+    const segments = lineData.text.split('|').map((segment) => segment.trim());
+    const labelRegex = new RegExp(`${label}\\s*-\\s*([^|\\n]+)`, 'i');
+    const segment = segments.find((item) => labelRegex.test(item)) || lineData.text;
+    const match = segment.match(labelRegex);
+    return match ? match[1].trim() : '';
+  }
+
   const arosAvulsos = [];
   const padroesAro = textoCompleto.match(/Aro\s*-\s*([^\n|]+)/g);
 
@@ -4020,38 +4259,49 @@ function capturarDados() {
     padroesAro.forEach((match, index) => {
       const textoAro = match.replace(/Aro\s*-\s*/, '').trim();
       const numeroMatch = textoAro.match(/(\d+(?:\.\d+)?)/);
-      const numero = numeroMatch ? numeroMatch[1] : '';
+      const numeroBase = numeroMatch ? numeroMatch[1] : '';
       const matchIndex = findLineIndexByOccurrence(match, index);
       const modeloAro = extractModeloNearby(matchIndex) || modelo;
-      const reforcoModeloSegundoAvulso = index === 1 && (/pedra/i.test(modeloAro) || modeloTemPedra);
-      const comPedra = hasComPedraNearby(matchIndex, textoAro) || reforcoModeloSegundoAvulso ? ' com pedra' : '';
-      arosAvulsos.push({ numero: numero + comPedra, modelo: modeloAro || modelo });
+      const shouldAppendStone = clipShouldAppendComPedra({
+        index,
+        aroText: textoAro,
+        modelo: modeloAro,
+        fallbackModelo: modelo
+      }) || (index === 1 && modeloTemPedra);
+      const numero = clipRemoveComPedra(numeroBase);
+      arosAvulsos.push({
+        numero: shouldAppendStone ? `${numero} com pedra` : numero,
+        modelo: modeloAro || modelo
+      });
     });
   } else {
-    const aroMasculinoMatch = textoCompleto.match(/Masculino\s*-\s*([^\n|]+)/);
+    const textoAroMasculino = extractCoupleAroText('Masculino');
     let aroMasculino = '';
-    if (aroMasculinoMatch) {
-      const textoAro = aroMasculinoMatch[1].trim();
+    if (textoAroMasculino) {
+      const textoAro = textoAroMasculino;
       const numeroMatch = textoAro.match(/(\d+(?:\.\d+)?)/);
-      const numero = numeroMatch ? numeroMatch[1] : textoAro;
-      const linhaIndex = findLineIndexByRegex(/Masculino\s*-\s*/i);
-      aroMasculino = numero + (hasComPedraNearby(linhaIndex, textoAro) ? ' com pedra' : '');
+      const numeroBase = numeroMatch ? numeroMatch[1] : textoAro;
+      aroMasculino = clipRemoveComPedra(numeroBase);
     }
-    const aroFemininoMatch = textoCompleto.match(/Feminino\s*-\s*([^\n|]+)/);
+    const textoAroFeminino = extractCoupleAroText('Feminino');
     let aroFeminino = '';
-    if (aroFemininoMatch) {
-      const textoAro = aroFemininoMatch[1].trim();
+    if (textoAroFeminino) {
+      const textoAro = textoAroFeminino;
       const numeroMatch = textoAro.match(/(\d+(?:\.\d+)?)/);
-      const numero = numeroMatch ? numeroMatch[1] : textoAro;
-      const linhaIndex = findLineIndexByRegex(/Feminino\s*-\s*/i);
-      aroFeminino = numero + (hasComPedraNearby(linhaIndex, textoAro) || modeloTemPedra ? ' com pedra' : '');
+      const numeroBase = numeroMatch ? numeroMatch[1] : textoAro;
+      const numero = clipRemoveComPedra(numeroBase);
+      aroFeminino = clipShouldAppendComPedra({
+        tipo: 'Feminino',
+        aroText: textoAro,
+        modelo
+      }) ? `${numero} com pedra` : numero;
     }
     if (aroMasculino || aroFeminino) {
       arosAvulsos.push({ numero: aroMasculino, modelo: modelo, tipo: 'Masculino' });
       arosAvulsos.push({ numero: aroFeminino, modelo: modelo, tipo: 'Feminino' });
     }
   }
-  return { login, modelo, aros: arosAvulsos, url };
+  return clipSanitizeCapturedData({ login, modelo, aros: arosAvulsos, url });
 }
 
 function formatarTextoParaCopia(dados) {
@@ -4208,6 +4458,52 @@ function formatarTextoPrimeiraMaiuscula(texto) {
   return texto.toLowerCase().split(' ').map(p => p.charAt(0).toUpperCase() + p.slice(1)).join(' ');
 }
 
+function getClipIconButtonPalette(kind, active = false) {
+  const palettes = {
+    coracao: isDarkTheme
+      ? { color: '#f472b6', border: 'rgba(244,114,182,0.3)', background: 'transparent' }
+      : { color: '#be185d', border: 'rgba(244,114,182,0.42)', background: 'rgba(244,114,182,0.1)' },
+    infinito: isDarkTheme
+      ? { color: '#60a5fa', border: 'rgba(96,165,250,0.3)', background: 'transparent' }
+      : { color: '#1d4ed8', border: 'rgba(96,165,250,0.42)', background: 'rgba(96,165,250,0.1)' },
+    formatar: isDarkTheme
+      ? { color: '#ffffff', border: 'rgba(255,255,255,0.15)', background: 'transparent' }
+      : { color: '#334155', border: 'rgba(148,163,184,0.34)', background: 'rgba(255,255,255,0.92)' },
+    config: isDarkTheme
+      ? { color: active ? '#ffffff' : 'rgba(255,255,255,0.5)', border: 'rgba(255,255,255,0.15)', background: active ? 'rgba(255,255,255,0.15)' : 'transparent' }
+      : { color: active ? '#312e81' : '#475569', border: 'rgba(148,163,184,0.34)', background: active ? 'rgba(99,102,241,0.16)' : 'rgba(255,255,255,0.92)' }
+  };
+
+  return palettes[kind];
+}
+
+function getClipIconButtonHoverPalette(kind, active = false) {
+  const palettes = {
+    coracao: isDarkTheme
+      ? { color: '#f472b6', border: 'rgba(244,114,182,0.3)', background: 'rgba(244,114,182,0.15)' }
+      : { color: '#9d174d', border: 'rgba(244,114,182,0.48)', background: 'rgba(244,114,182,0.18)' },
+    infinito: isDarkTheme
+      ? { color: '#60a5fa', border: 'rgba(96,165,250,0.3)', background: 'rgba(96,165,250,0.15)' }
+      : { color: '#1e40af', border: 'rgba(96,165,250,0.48)', background: 'rgba(96,165,250,0.18)' },
+    formatar: isDarkTheme
+      ? { color: '#ffffff', border: 'rgba(255,255,255,0.18)', background: 'rgba(255,255,255,0.1)' }
+      : { color: '#0f172a', border: 'rgba(148,163,184,0.4)', background: 'rgba(226,232,240,0.9)' },
+    config: isDarkTheme
+      ? { color: '#ffffff', border: 'rgba(255,255,255,0.18)', background: active ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.1)' }
+      : { color: '#1e1b4b', border: 'rgba(99,102,241,0.34)', background: active ? 'rgba(99,102,241,0.2)' : 'rgba(226,232,240,0.9)' }
+  };
+
+  return palettes[kind];
+}
+
+function paintClipIconButton(button, kind, active = false, hovered = false) {
+  if (!button) return;
+  const palette = hovered ? getClipIconButtonHoverPalette(kind, active) : getClipIconButtonPalette(kind, active);
+  button.style.color = palette.color;
+  button.style.borderColor = palette.border;
+  button.style.background = palette.background;
+}
+
 function criarBotoesSimbolos() {
   return `
     <div style="display: flex; gap: 6px;">
@@ -4239,32 +4535,36 @@ function adicionarEventosBotoesSimbolos() {
 
   const btnCoracao = document.getElementById('btn-coracao');
   if (btnCoracao) {
+    paintClipIconButton(btnCoracao, 'coracao');
     btnCoracao.addEventListener('click', () => { if (campoAtivo) inserirSimboloNoCursor(campoAtivo, '♥'); });
-    btnCoracao.addEventListener('mouseenter', () => { btnCoracao.style.background = 'rgba(244,114,182,0.15)'; });
-    btnCoracao.addEventListener('mouseleave', () => { btnCoracao.style.background = 'transparent'; });
+    btnCoracao.addEventListener('mouseenter', () => paintClipIconButton(btnCoracao, 'coracao', false, true));
+    btnCoracao.addEventListener('mouseleave', () => paintClipIconButton(btnCoracao, 'coracao'));
   }
   const btnInfinito = document.getElementById('btn-infinito');
   if (btnInfinito) {
+    paintClipIconButton(btnInfinito, 'infinito');
     btnInfinito.addEventListener('click', () => { if (campoAtivo) inserirSimboloNoCursor(campoAtivo, '∞'); });
-    btnInfinito.addEventListener('mouseenter', () => { btnInfinito.style.background = 'rgba(96,165,250,0.15)'; });
-    btnInfinito.addEventListener('mouseleave', () => { btnInfinito.style.background = 'transparent'; });
+    btnInfinito.addEventListener('mouseenter', () => paintClipIconButton(btnInfinito, 'infinito', false, true));
+    btnInfinito.addEventListener('mouseleave', () => paintClipIconButton(btnInfinito, 'infinito'));
   }
   const btnFormatarTudo = document.getElementById('btn-formatar-tudo');
   if (btnFormatarTudo) {
+    paintClipIconButton(btnFormatarTudo, 'formatar');
     btnFormatarTudo.addEventListener('click', () => {
       document.querySelectorAll('input[type="text"]').forEach(campo => {
         if (campo.id && campo.id.startsWith('campo-valor-')) campo.value = formatarTextoPrimeiraMaiuscula(campo.value);
       });
       mostrarNotificacao('Todos os textos foram formatados!');
     });
-    btnFormatarTudo.addEventListener('mouseenter', () => { btnFormatarTudo.style.background = 'rgba(255,255,255,0.1)'; });
-    btnFormatarTudo.addEventListener('mouseleave', () => { btnFormatarTudo.style.background = 'transparent'; });
+    btnFormatarTudo.addEventListener('mouseenter', () => paintClipIconButton(btnFormatarTudo, 'formatar', false, true));
+    btnFormatarTudo.addEventListener('mouseleave', () => paintClipIconButton(btnFormatarTudo, 'formatar'));
   }
 }
 
 function criarInterfaceAro(aro, index, isAvulso = false) {
   const tipoLabel = isAvulso ? `AVL ${index + 1}` : (aro.tipo || `ARO ${index + 1}`);
   const badgeColor = aro.tipo === 'Masculino' ? '#6366f1' : aro.tipo === 'Feminino' ? '#ec4899' : '#8b5cf6';
+  const numeroAro = aro.tipo === 'Masculino' ? clipRemoveComPedra(aro.numero || '') : (aro.numero || '');
 
   let html = `<div style="margin-bottom:8px;padding:10px;border:1px solid rgba(255,255,255,0.08);border-radius:12px;background:rgba(255,255,255,0.04);">`;
   html += `<span style="display:inline-block;padding:2px 8px;border-radius:20px;font-size:9px;font-weight:700;letter-spacing:1px;color:white;background:${badgeColor};margin-bottom:8px;text-transform:uppercase;">${tipoLabel}</span>`;
@@ -4274,7 +4574,7 @@ function criarInterfaceAro(aro, index, isAvulso = false) {
     html += `<input type="text" id="campo-modelo-aro-${index}" value="${aro.modelo}" autocomplete="off" spellcheck="false" style="width:100%;padding:6px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:12px;box-sizing:border-box;outline:none;">`;
     html += `</div>`;
   }
-  html += `<div style="margin-bottom:5px;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">ARO</label><input type="text" id="campo-aro-${index}" value="${aro.numero}" autocomplete="off" spellcheck="false" style="width:100%;padding:7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;"></div>`;
+  html += `<div style="margin-bottom:5px;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">ARO</label><input type="text" id="campo-aro-${index}" value="${numeroAro}" autocomplete="off" spellcheck="false" style="width:100%;padding:7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;"></div>`;
   html += `<div style="position:relative;"><label style="display:block;margin-bottom:3px;font-size:9px;font-weight:600;letter-spacing:1px;text-transform:uppercase;color:#ffffff;">DADOS</label><input type="text" id="campo-valor-${index}" value="" autocomplete="off" spellcheck="false" style="width:100%;padding:7px 30px 7px 8px;background:rgba(255,255,255,0.07);border:1px solid rgba(255,255,255,0.1);border-radius:8px;color:#fff;font-size:13px;box-sizing:border-box;outline:none;" placeholder="Dados..."><button class="btn-formatar" data-target="campo-valor-${index}" style="position:absolute;right:4px;bottom:4px;width:24px;height:24px;background:transparent;color:#ffffff;border:none;border-radius:4px;cursor:pointer;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;transition:all 0.2s;" title="Formatar texto">Aa</button></div>`;
   html += `</div>`;
   return html;
@@ -4334,12 +4634,20 @@ function mostrarPopup() {
   const popupExistente = document.getElementById('extensao-popup-overlay');
   if (popupExistente) popupExistente.remove();
 
-  const dados = carregarDados();
+  let dados = carregarDados();
+  if (clipNeedsFreshCapture(dados)) {
+    const dadosPagina = capturarDados();
+    if (dadosPagina.login || dadosPagina.modelo || (Array.isArray(dadosPagina.aros) && dadosPagina.aros.length > 0)) {
+      salvarDados(dadosPagina);
+      dados = dadosPagina;
+    }
+  }
   const isAvulso = dados.aros.length > 0 && !dados.aros[0].tipo;
 
   const container = document.createElement('div');
   container.id = 'extensao-popup-overlay';
   container.style.cssText = `position:fixed;top:8px;right:8px;width:340px;background:linear-gradient(180deg,#1a1a2e 0%,#16213e 100%);z-index:10000;box-shadow:-4px 0 24px rgba(0,0,0,0.4);overflow:hidden;font-family:'Segoe UI',system-ui,-apple-system,sans-serif;border-radius:16px;`;
+  applyHubTheme(container, { isClip: true });
 
   const popup = document.createElement('div');
   popup.style.cssText = `padding:16px;box-sizing:border-box;`;
@@ -4430,6 +4738,7 @@ function mostrarPopup() {
     }
   });
   makeClipDraggable(container);
+  clipSanitizeMasculinoField();
 
   adicionarEventosBotoesSimbolos();
 
@@ -4464,6 +4773,7 @@ function mostrarPopup() {
   copiarBtn.addEventListener('mouseenter', () => { copiarBtn.style.boxShadow = '0 4px 16px rgba(99,102,241,0.45)'; copiarBtn.style.transform = 'translateY(-1px)'; });
   copiarBtn.addEventListener('mouseleave', () => { copiarBtn.style.boxShadow = '0 2px 8px rgba(99,102,241,0.3)'; copiarBtn.style.transform = 'translateY(0)'; });
   copiarBtn.addEventListener('click', () => {
+    clipSanitizeMasculinoField();
     const dadosParaCopiar = coletarDadosDaInterface(dados);
     const textoFormatado = formatarTextoParaCopia(dadosParaCopiar);
     const closeClip = () => { container.remove(); document.getElementById('sp-btn-clip')?.classList.remove('sp-active'); };
@@ -4481,25 +4791,26 @@ function mostrarPopup() {
   let configAberta = false;
 
   if (btnConfig) {
+    paintClipIconButton(btnConfig, 'config', false, false);
     btnConfig.addEventListener('click', async () => {
       configAberta = !configAberta;
       const conteudoPrincipal = document.getElementById('conteudo-principal');
       const footerPrincipal = document.getElementById('footer-principal');
       if (configAberta) {
-        btnConfig.style.background = 'rgba(255,255,255,0.15)'; btnConfig.style.color = '#fff';
+        paintClipIconButton(btnConfig, 'config', true, false);
         if (conteudoPrincipal) conteudoPrincipal.style.display = 'none';
         if (footerPrincipal) footerPrincipal.style.display = 'none';
         viewConfig.style.display = 'block';
         await carregarDadosConfig();
       } else {
-        btnConfig.style.background = 'transparent'; btnConfig.style.color = 'rgba(255,255,255,0.5)';
+        paintClipIconButton(btnConfig, 'config', false, false);
         if (conteudoPrincipal) conteudoPrincipal.style.display = 'block';
         if (footerPrincipal) footerPrincipal.style.display = 'flex';
         viewConfig.style.display = 'none';
       }
     });
-    btnConfig.addEventListener('mouseenter', () => { if (!configAberta) btnConfig.style.background = 'rgba(255,255,255,0.1)'; });
-    btnConfig.addEventListener('mouseleave', () => { if (!configAberta) btnConfig.style.background = 'transparent'; });
+    btnConfig.addEventListener('mouseenter', () => paintClipIconButton(btnConfig, 'config', configAberta, true));
+    btnConfig.addEventListener('mouseleave', () => paintClipIconButton(btnConfig, 'config', configAberta, false));
   }
 
   async function carregarDadosConfig() {
@@ -4629,6 +4940,7 @@ function mostrarPopup() {
       const columnId = document.getElementById('enviar-coluna').value;
       const responsible = config.responsible || '';
       if (!columnId) { mostrarNotificacao('Selecione a lista', 'error'); return; }
+      clipSanitizeMasculinoField();
       const dadosParaCopiar = coletarDadosDaInterface(dados);
       const descricao = formatarTextoParaCopia(dadosParaCopiar);
       const titulo = document.getElementById('campo-login')?.value || 'Sem título';
@@ -4651,13 +4963,7 @@ function coletarDadosDaInterface(dadosOriginais) {
   const modelo = document.getElementById('campo-modelo')?.value || '';
   const url = document.getElementById('campo-url')?.value || '';
   const aros = [];
-  const modeloTemPedra = /pedra/i.test(modelo);
-  const appendComPedra = (numero, shouldAppend) => {
-    const base = (numero || '').trim();
-    if (!base) return base;
-    if (!shouldAppend || /com\s+pedra/i.test(base)) return base;
-    return `${base} com pedra`;
-  };
+  const modeloTemPedra = clipModelHasPedra(modelo);
   if (dadosOriginais.aros.length > 0) {
     dadosOriginais.aros.forEach((aro, index) => {
       const campoAro = document.getElementById(`campo-aro-${index}`);
@@ -4665,9 +4971,17 @@ function coletarDadosDaInterface(dadosOriginais) {
       const campoModeloAro = document.getElementById(`campo-modelo-aro-${index}`);
       if (campoAro) {
         const modeloAro = campoModeloAro ? campoModeloAro.value : aro.modelo;
-        const reforcoPedra = (aro.tipo === 'Feminino') || (!aro.tipo && index === 1 && (/pedra/i.test(modeloAro || '') || modeloTemPedra));
+        const reforcoPedra = clipShouldAppendComPedra({
+          tipo: aro.tipo,
+          index,
+          aroText: campoAro.value || '',
+          numeroAtual: aro.numero || '',
+          modelo: modeloAro,
+          fallbackModelo: modeloTemPedra ? modelo : ''
+        });
+        const numeroBase = clipRemoveComPedra(campoAro.value);
         aros.push({
-          numero: appendComPedra(campoAro.value, reforcoPedra),
+          numero: reforcoPedra ? `${numeroBase} com pedra` : numeroBase,
           valor: campoValor ? campoValor.value.trim() : '',
           tipo: aro.tipo,
           modelo: modeloAro
@@ -4679,9 +4993,20 @@ function coletarDadosDaInterface(dadosOriginais) {
     const campoValorMasc = document.getElementById('campo-valor-0');
     const campoAroFem = document.getElementById('campo-aro-1');
     const campoValorFem = document.getElementById('campo-valor-1');
-    aros.push({ numero: campoAroMasc ? campoAroMasc.value.trim() : '', valor: campoValorMasc ? campoValorMasc.value.trim() : '', tipo: 'Masculino', modelo });
+    const numeroMasc = clipRemoveComPedra(campoAroMasc ? campoAroMasc.value.trim() : '');
+    const numeroFemBase = clipRemoveComPedra(campoAroFem ? campoAroFem.value.trim() : '');
     aros.push({
-      numero: appendComPedra(campoAroFem ? campoAroFem.value.trim() : '', modeloTemPedra),
+      numero: numeroMasc,
+      valor: campoValorMasc ? campoValorMasc.value.trim() : '',
+      tipo: 'Masculino',
+      modelo
+    });
+    aros.push({
+      numero: clipShouldAppendComPedra({
+        tipo: 'Feminino',
+        aroText: campoAroFem ? campoAroFem.value.trim() : '',
+        modelo
+      }) ? `${numeroFemBase} com pedra` : numeroFemBase,
       valor: campoValorFem ? campoValorFem.value.trim() : '',
       tipo: 'Feminino',
       modelo
@@ -4742,12 +5067,19 @@ function monitorarMudancasURL() {
     const novaURL = window.location.href;
     if (novaURL !== urlAtual) {
       urlAtual = novaURL;
-      const dadosExistentes = carregarDados();
-      if (dadosExistentes && (dadosExistentes.login || dadosExistentes.modelo)) {
-        const foiAtualizado = atualizarApenasURL(novaURL);
-        if (foiAtualizado) {
-          console.log('[Sentinela Pro] URL atualizado automaticamente:', novaURL);
-          mostrarNotificacaoURL('URL atualizado');
+      const dadosPagina = capturarDados();
+      if (dadosPagina.login || dadosPagina.modelo || (Array.isArray(dadosPagina.aros) && dadosPagina.aros.length > 0)) {
+        salvarDados(dadosPagina);
+        console.log('[Sentinela Pro] Dados recapturados automaticamente:', novaURL);
+        mostrarNotificacaoURL('Dados recapturados');
+      } else {
+        const dadosExistentes = carregarDados();
+        if (dadosExistentes && (dadosExistentes.login || dadosExistentes.modelo)) {
+          const foiAtualizado = atualizarApenasURL(novaURL);
+          if (foiAtualizado) {
+            console.log('[Sentinela Pro] URL atualizado automaticamente:', novaURL);
+            mostrarNotificacaoURL('URL atualizado');
+          }
         }
       }
     }
@@ -4761,9 +5093,9 @@ if (window.location.hostname.includes('mercadolivre.com.br') || window.location.
   window.addEventListener('load', () => {
     monitorarMudancasURL();
     const dadosJaSalvos = carregarDados();
-    if (!dadosJaSalvos || !dadosJaSalvos.url) {
+    if (clipNeedsFreshCapture(dadosJaSalvos)) {
       const dadosPagina = capturarDados();
-      if (dadosPagina.login || dadosPagina.modelo) {
+      if (dadosPagina.login || dadosPagina.modelo || (Array.isArray(dadosPagina.aros) && dadosPagina.aros.length > 0)) {
         salvarDados(dadosPagina);
         
       }
