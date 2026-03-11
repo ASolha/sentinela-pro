@@ -9,6 +9,7 @@
 
 const PEGADOR_STORAGE_KEY = 'pegadorLastQuantity';
 const ORDER_PICKER_TABLE = 'order_picker_history';
+const HUB_PROFILE_TABLE = 'hub_user_profiles';
 const HUB_SESSION_KEY = 'sp_hub_session';
 const HUB_BUTTON_ORDER_KEY = 'sp_hub_button_order';
 const HUB_DEFAULT_BUTTON_ORDER = ['passo', 'clip', 'counter', 'orders', 'gestor'];
@@ -36,6 +37,8 @@ let orderPickerCurrentView = 'picker';
 let orderPickerHistoryCache = [];
 let orderPickerHistoryLoaded = false;
 let orderPickerHistoryLoading = false;
+let hubProfilesCache = {};
+let hubProfilesLoaded = false;
 
 const GESTOR_IGNORE_MODEL_TERMS = [
   /pend[êe]ncia/i,
@@ -196,6 +199,109 @@ async function restoreAuthSession() {
   return true;
 }
 
+function normalizeHubDisplayName(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+}
+
+function normalizeHubUserProfile(profile) {
+  const userId = String(profile?.user_id || '').trim();
+  if (!userId) return null;
+
+  return {
+    userId,
+    displayName: normalizeHubDisplayName(profile?.display_name)
+  };
+}
+
+async function loadHubUserProfiles(force = false) {
+  if (!hasAuthSession()) {
+    hubProfilesCache = {};
+    hubProfilesLoaded = true;
+    return hubProfilesCache;
+  }
+
+  if (hubProfilesLoaded && !force) return hubProfilesCache;
+
+  const rows = await sbFetch(`/rest/v1/${HUB_PROFILE_TABLE}?select=user_id,display_name,updated_at`);
+  const nextCache = {};
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const normalized = normalizeHubUserProfile(row);
+    if (normalized) nextCache[normalized.userId] = normalized;
+  });
+
+  hubProfilesCache = nextCache;
+  hubProfilesLoaded = true;
+  if (orderPickerHistoryCache.length) {
+    orderPickerHistoryCache = normalizeOrderPickerHistory(orderPickerHistoryCache);
+  }
+  return hubProfilesCache;
+}
+
+function getHubUserDisplayName(userId = auth.user?.id, fallbackEmail = '') {
+  const normalizedUserId = String(userId || '').trim();
+  const profile = normalizedUserId ? hubProfilesCache[normalizedUserId] : null;
+  if (profile?.displayName) return profile.displayName;
+
+  if (normalizedUserId && normalizedUserId === String(auth.user?.id || '')) {
+    const authDisplayName = normalizeHubDisplayName(
+      auth.user?.user_metadata?.display_name
+        || auth.user?.user_metadata?.full_name
+        || auth.user?.user_metadata?.name
+        || ''
+    );
+    if (authDisplayName) return authDisplayName;
+    return normalizeHubDisplayName(auth.user?.email || fallbackEmail || 'Conta conectada');
+  }
+
+  return normalizeHubDisplayName(fallbackEmail || 'Usuário do Hub');
+}
+
+function getAuthUserDisplayName() {
+  return getHubUserDisplayName(auth.user?.id, auth.user?.email || 'Conta conectada');
+}
+
+async function saveCurrentHubUserProfile(displayName) {
+  if (!hasAuthSession()) {
+    throw new Error('Faça login no Hub antes de salvar o nome de exibição.');
+  }
+
+  const normalized = normalizeHubDisplayName(displayName);
+  if (!normalized) {
+    throw new Error('Informe um nome de exibição.');
+  }
+
+  const payload = await sbFetch('/rest/v1/rpc/set_hub_display_name', {
+    method: 'POST',
+    body: JSON.stringify({
+      p_display_name: normalized
+    })
+  });
+
+  const normalizedProfile = normalizeHubUserProfile((Array.isArray(payload) ? payload[0] : payload) || {
+    user_id: auth.user.id,
+    display_name: normalized
+  });
+
+  if (normalizedProfile) {
+    auth.user = {
+      ...auth.user,
+      user_metadata: {
+        ...(auth.user?.user_metadata || {}),
+        display_name: normalizedProfile.displayName,
+        full_name: normalizedProfile.displayName,
+        name: normalizedProfile.displayName
+      }
+    };
+    hubProfilesCache[normalizedProfile.userId] = normalizedProfile;
+    hubProfilesLoaded = true;
+    if (orderPickerHistoryCache.length) {
+      orderPickerHistoryCache = normalizeOrderPickerHistory(orderPickerHistoryCache);
+    }
+  }
+
+  return normalizedProfile;
+}
+
 function formatGestorDate(dateString) {
   if (!dateString) return '';
   try {
@@ -226,11 +332,38 @@ function getGestorLoginFromPage(pageText = '') {
   return match ? match[1].trim() : '';
 }
 
+function isGestorParAlianca(pageText = '', modelo = '') {
+  return /\bPar\s+Alian[cç]a\b/i.test(`${String(pageText || '')}\n${String(modelo || '')}`);
+}
+
+function buildGestorPairAros(aros = []) {
+  const entries = Array.isArray(aros) ? aros : [];
+  const masculino = entries.find((aro) => String(aro?.tipo || '').trim() === 'Masculino') || entries[0] || {};
+  const feminino = entries.find((aro) => String(aro?.tipo || '').trim() === 'Feminino') || entries[1] || {};
+  const masculinoNumero = clipRemoveComPedra(String(masculino?.numero || '').trim());
+  const femininoNumero = String(feminino?.numero || '').trim();
+
+  return [
+    {
+      label: 'Masculino',
+      value: masculinoNumero,
+      model: '',
+      type: 'Masculino'
+    },
+    {
+      label: 'Feminino',
+      value: femininoNumero,
+      model: '',
+      type: 'Feminino'
+    }
+  ];
+}
+
 function captureGestorPageData() {
   const url = window.location.href;
   const pageText = getGestorPageText();
-  const pageLines = pageText.split('\n');
-  const loginCliente = getGestorLoginFromPage(pageText);
+  const clipData = clipSanitizeCapturedData(capturarDados());
+  const loginCliente = clipData?.login || getGestorLoginFromPage(pageText);
 
   let numeroVenda = '';
   const vendaMatch = pageText.match(/Venda\s*#\s*(\d+)/i);
@@ -246,109 +379,25 @@ function captureGestorPageData() {
     }
   }
 
-  let modelo = '';
-  const modeloPatterns = [
-    /\*\*(\d+mm[^*\n]+)/,
-    /(\d+mm\s+[^\n]+)/,
-    /\*\*([^*]*\d+mm[^*\n]+)/,
-    /Modelo:\s*([^\n]+)/i
-  ];
-  for (const pattern of modeloPatterns) {
-    const match = pageText.match(pattern);
-    if (!match) continue;
-    let candidate = match[1].replace(/\*\*/g, '').trim();
-    candidate = candidate.replace(/\s+(Banhad[ao]|Folhead[ao]).*$/i, '').trim();
-    if (!candidate || GESTOR_IGNORE_MODEL_TERMS.some((rule) => rule.test(candidate))) continue;
-    modelo = candidate;
-    break;
-  }
-
-  function findGestorLineIndexByOccurrence(fragment, occurrence = 0) {
-    let count = 0;
-    for (let i = 0; i < pageLines.length; i += 1) {
-      if (!pageLines[i].includes(fragment)) continue;
-      if (count === occurrence) return i;
-      count += 1;
-    }
-    return -1;
-  }
-
-  function hasGestorComPedraNearby(index, fallbackText = '') {
-    if (/com\s+pedra/i.test(fallbackText)) return true;
-    if (index >= 0) {
-      for (let j = Math.max(0, index - 3); j <= Math.min(pageLines.length - 1, index + 3); j += 1) {
-        if (/com\s+pedra/i.test(pageLines[j])) return true;
-      }
-    }
-    return false;
-  }
-
-  function extractGestorModeloNearby(index) {
-    if (index < 0) return '';
-    for (let j = Math.max(0, index - 3); j <= Math.min(pageLines.length - 1, index + 3); j += 1) {
-      const candidateLine = pageLines[j];
-      for (const pattern of modeloPatterns) {
-        const modelMatch = candidateLine.match(pattern);
-        if (!modelMatch) continue;
-        let candidate = modelMatch[1].replace(/\*\*/g, '').trim();
-        candidate = candidate.replace(/\s+(Banhad[ao]|Folhead[ao]).*$/i, '').trim();
-        if (!candidate || GESTOR_IGNORE_MODEL_TERMS.some((rule) => rule.test(candidate))) continue;
-        return candidate;
-      }
-    }
-    return '';
-  }
-
-  function extractGestorCoupleAroText(label) {
-    const match = pageText.match(new RegExp(`${label}\\s*[-\\u2013]\\s*([^\\n|]+)`, 'i'));
-    return match ? match[1].trim() : '';
-  }
-
-  const aroCaptures = [];
-  const aroMatches = pageText.match(/Aro\s*-\s*([^\n|]+)/g);
-  if (aroMatches?.length) {
-    aroMatches.forEach((match, index) => {
-      const text = match.replace(/Aro\s*-\s*/i, '').trim();
-      const numberMatch = text.match(/(\d+(?:[.,]\d+)?)/);
-      const numero = numberMatch ? numberMatch[1] : '';
-      const matchIndex = findGestorLineIndexByOccurrence(match, index);
-      const comPedra = hasGestorComPedraNearby(matchIndex, text) ? ' com pedra' : '';
-      const modeloAro = extractGestorModeloNearby(matchIndex) || modelo;
-
-      aroCaptures.push({
-        label: `Avulso ${index + 1}`,
-        value: (numero + comPedra).trim(),
-        model: modeloAro || modelo
+  const modelo = String(clipData?.modelo || '').trim();
+  const clipAros = Array.isArray(clipData?.aros) ? clipData.aros : [];
+  const aroCaptures = isGestorParAlianca(pageText, modelo)
+    ? buildGestorPairAros(clipAros)
+    : clipAros.map((aro, index) => {
+        const tipo = String(aro?.tipo || '').trim();
+        return {
+          label: tipo || `Avulso ${index + 1}`,
+          value: String(aro?.numero || '').trim(),
+          model: String(aro?.modelo || modelo || '').trim(),
+          type: tipo
+        };
       });
-    });
-  } else {
-    const textoAroMasculino = extractGestorCoupleAroText('Masculino');
-    let aroMasculino = '';
-    if (textoAroMasculino) {
-      const numberMatch = textoAroMasculino.match(/(\d+(?:[.,]\d+)?)/);
-      const numero = numberMatch ? numberMatch[1] : textoAroMasculino;
-      aroMasculino = (numero + (/com\s+pedra/i.test(textoAroMasculino) ? ' com pedra' : '')).trim();
-    }
-
-    const textoAroFeminino = extractGestorCoupleAroText('Feminino');
-    let aroFeminino = '';
-    if (textoAroFeminino) {
-      const numberMatch = textoAroFeminino.match(/(\d+(?:[.,]\d+)?)/);
-      const numero = numberMatch ? numberMatch[1] : textoAroFeminino;
-      aroFeminino = (numero + (/com\s+pedra/i.test(textoAroFeminino) ? ' com pedra' : '')).trim();
-    }
-
-    if (aroMasculino || aroFeminino) {
-      aroCaptures.push({ label: 'Masculino', value: aroMasculino, model: modelo, type: 'Masculino' });
-      aroCaptures.push({ label: 'Feminino', value: aroFeminino, model: modelo, type: 'Feminino' });
-    }
-  }
 
   return {
     login_cliente: loginCliente,
     numero_venda: numeroVenda,
     modelo,
-    url,
+    url: clipData?.url || url,
     aro: buildGestorAroValue(aroCaptures)
   };
 }
@@ -359,7 +408,12 @@ function hasGestorCapturedMeaningfulData(data) {
 
 function getGestorCapturedPageData(force = false) {
   if (!force && gestorCapturedData && gestorLastCaptureUrl === window.location.href && gestorCapturedData.login_cliente) {
-    return gestorCapturedData;
+    const pageText = document.body?.innerText || '';
+    const cachedAros = parseGestorAros(gestorCapturedData.aro || '');
+    const cachedMissingStone = cachedAros.some((aro) => !clipTextHasComPedra(String(aro?.value || '')));
+    if (!clipTextHasComPedra(pageText) || !cachedMissingStone) {
+      return gestorCapturedData;
+    }
   }
 
   const captured = captureGestorPageData();
@@ -679,18 +733,45 @@ function formatGestorCardForFefrello(pendencia) {
 }
 
 function getGestorStorageArea(areaName) {
-  return chrome.storage?.[areaName] || chrome.storage.local;
+  const namedArea = chrome?.storage?.[areaName];
+  if (namedArea?.get && namedArea?.set) return namedArea;
+
+  const localArea = chrome?.storage?.local;
+  if (localArea?.get && localArea?.set) return localArea;
+
+  return null;
 }
 
 function getGestorScopedStorage(key, areaName = 'local') {
   return new Promise((resolve) => {
-    getGestorStorageArea(areaName).get([key], (result) => resolve(result?.[key] || {}));
+    const storageArea = getGestorStorageArea(areaName);
+    if (!storageArea?.get) {
+      console.warn(`[Sentinela Pro] chrome.storage.${areaName} indisponível; usando objeto vazio.`);
+      resolve({});
+      return;
+    }
+
+    storageArea.get([key], (result) => {
+      if (chrome.runtime?.lastError) {
+        console.warn(`[Sentinela Pro] Falha ao ler ${key} em chrome.storage.${areaName}:`, chrome.runtime.lastError.message);
+        resolve({});
+        return;
+      }
+      resolve(result?.[key] || {});
+    });
   });
 }
 
 function setGestorScopedStorage(key, value, areaName = 'local') {
   return new Promise((resolve) => {
-    getGestorStorageArea(areaName).set({ [key]: value }, () => {
+    const storageArea = getGestorStorageArea(areaName);
+    if (!storageArea?.set) {
+      console.warn(`[Sentinela Pro] chrome.storage.${areaName} indisponível; gravação ignorada para ${key}.`);
+      resolve();
+      return;
+    }
+
+    storageArea.set({ [key]: value }, () => {
       if (chrome.runtime?.lastError) {
         console.warn(`[Sentinela Pro] Falha ao salvar ${key} em chrome.storage.${areaName}:`, chrome.runtime.lastError.message);
       }
@@ -916,6 +997,10 @@ async function sendGestorEmail(subject, html) {
     throw new Error(err?.error?.message || `Gmail API: HTTP ${res.status}`);
   }
   return res.json();
+}
+
+function buildGestorEmailSubject(loginCliente, date) {
+  return `${String(loginCliente || 'Cliente').trim() || 'Cliente'} - B.O. - ${date}`;
 }
 
 async function loadGestorPendencias() {
@@ -1284,10 +1369,11 @@ function syncAuthButton() {
   if (!btn || !badge) return;
 
   const email = auth.user?.email || '';
-  const initial = email ? email.charAt(0).toUpperCase() : '';
+  const displayName = getAuthUserDisplayName();
+  const initial = (displayName || email || '').charAt(0).toUpperCase();
 
   btn.classList.toggle('sp-active', hasAuthSession());
-  btn.title = hasAuthSession() ? `Conta conectada: ${email}` : 'Conta do Hub (Alt+U)';
+  btn.title = hasAuthSession() ? `Conta conectada: ${displayName}` : 'Conta do Hub (Alt+U)';
   badge.textContent = initial;
   badge.dataset.connected = hasAuthSession() ? 'true' : 'false';
 
@@ -1305,6 +1391,7 @@ function setAuthPanelStatus(message = '', tone = 'info') {
 function renderAuthPanelContent(panel) {
   const themeLabel = isDarkTheme ? 'Escuro' : 'Claro';
   const themeAction = isDarkTheme ? 'Usar tema claro' : 'Usar tema escuro';
+  const displayName = getAuthUserDisplayName();
   const themeMarkup = `
       <div class="sp-auth-theme">
         <div class="sp-auth-theme__copy">
@@ -1323,12 +1410,17 @@ function renderAuthPanelContent(panel) {
       </div>
       <p class="sp-auth-copy">Conectado com a conta que será usada pelo Gestor e pelo Passo Largo.</p>
       <div class="sp-auth-summary">
-        <span class="sp-auth-avatar">${(auth.user?.email || '?').charAt(0).toUpperCase()}</span>
+        <span class="sp-auth-avatar">${(displayName || auth.user?.email || '?').charAt(0).toUpperCase()}</span>
         <div>
-          <strong>${escapeHtml(auth.user?.email || 'Conta conectada')}</strong>
-          <p>Sessão ativa neste navegador.</p>
+          <strong>${escapeHtml(displayName || auth.user?.email || 'Conta conectada')}</strong>
+          <p>${escapeHtml(auth.user?.email || 'Sessão ativa neste navegador.')}</p>
         </div>
       </div>
+      <label class="sp-auth-field">
+        <span>Nome de exibição</span>
+        <input id="sp-auth-display-name" type="text" maxlength="80" placeholder="Ex.: Bruno / Expedição" value="${escapeHtml(displayName)}" />
+      </label>
+      <button type="button" id="sp-auth-save-display-name" class="sp-auth-run sp-auth-run--secondary">Salvar nome</button>
       ${themeMarkup}
       <button type="button" id="sp-auth-logout" class="sp-auth-run sp-auth-run--danger">Sair</button>
       <p id="sp-auth-status" class="sp-auth-status" data-tone="info"></p>
@@ -1361,6 +1453,13 @@ function bindAuthPanelEvents(panel) {
 
   if (hasAuthSession()) {
     panel.querySelector('#sp-auth-logout')?.addEventListener('click', onAuthLogout);
+    panel.querySelector('#sp-auth-save-display-name')?.addEventListener('click', onAuthSaveDisplayName);
+    panel.querySelector('#sp-auth-display-name')?.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        onAuthSaveDisplayName();
+      }
+    });
     return;
   }
 
@@ -1451,6 +1550,35 @@ async function onAuthLogin() {
     setAuthPanelStatus(error instanceof Error ? error.message : String(error), 'error');
   } finally {
     if (loginButton) loginButton.disabled = false;
+  }
+}
+
+async function onAuthSaveDisplayName() {
+  const panel = createAuthPanel();
+  const input = panel.querySelector('#sp-auth-display-name');
+  const button = panel.querySelector('#sp-auth-save-display-name');
+  const displayName = input?.value?.trim() || '';
+
+  if (button) button.disabled = true;
+  setAuthPanelStatus('Salvando nome...', 'info');
+
+  try {
+    await saveCurrentHubUserProfile(displayName);
+    syncAuthButton();
+    renderAuthPanelContent(panel);
+    if (panel.classList.contains('visible')) {
+      panel.querySelector('#sp-auth-display-name')?.focus();
+    }
+    if (document.getElementById('sp-order-panel')) {
+      renderOrderPickerSessionState(document.getElementById('sp-order-panel'));
+      renderOrderPickerDashboard(document.getElementById('sp-order-panel'));
+    }
+    setAuthPanelStatus('Nome de exibição salvo com sucesso.', 'success');
+  } catch (error) {
+    setAuthPanelStatus(error instanceof Error ? error.message : String(error), 'error');
+  } finally {
+    const refreshedButton = createAuthPanel().querySelector('#sp-auth-save-display-name');
+    if (refreshedButton) refreshedButton.disabled = false;
   }
 }
 
@@ -2409,7 +2537,7 @@ async function onGestorSendEmail(event) {
   setGestorStatus('Enviando email...', 'info');
   try {
     const date = new Date().toLocaleDateString('pt-BR');
-    const subject = `${pendencia.login_cliente || 'Cliente'} - Pendente - ${date}`;
+    const subject = buildGestorEmailSubject(pendencia.login_cliente, date);
     const body = `
       <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
         <h2 style="color:#222;border-bottom:3px solid #FFE600;padding-bottom:8px;">
@@ -2489,7 +2617,7 @@ async function onGestorSendIndividualAll() {
   for (const item of selected) {
     try {
       const date = new Date().toLocaleDateString('pt-BR');
-      const subject = `${item.login_cliente || 'Cliente'} - Pendente - ${date}`;
+      const subject = buildGestorEmailSubject(item.login_cliente, date);
       const body = `
         <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
           <h2 style="color:#222;border-bottom:3px solid #FFE600;padding-bottom:8px;">
@@ -2584,7 +2712,7 @@ async function onGestorSendEmailAction(event) {
   setGestorStatus('Enviando email...', 'info');
   try {
     const date = new Date().toLocaleDateString('pt-BR');
-    const subject = `${pendencia.login_cliente || 'Cliente'} - Pendente - ${date}`;
+    const subject = buildGestorEmailSubject(pendencia.login_cliente, date);
     await sendGestorEmail(subject, buildGestorSingleEmailHtml(pendencia, date));
     gestorEmailSentIds.add(String(id));
     await saveGestorCardStatus();
@@ -2740,7 +2868,7 @@ async function onGestorSendIndividualAllAction() {
   for (const item of selected) {
     try {
       const date = new Date().toLocaleDateString('pt-BR');
-      const subject = `${item.login_cliente || 'Cliente'} - Pendente - ${date}`;
+      const subject = buildGestorEmailSubject(item.login_cliente, date);
       await sendGestorEmail(subject, buildGestorSingleEmailHtml(item, date));
       gestorEmailSentIds.add(String(item.id));
       success += 1;
@@ -3006,9 +3134,14 @@ function normalizeOrderPickerHistoryEntry(entry) {
 
   const parsedDate = Date.parse(entry?.selected_at || entry?.selectedAt || entry?.created_at || '');
   const loginCliente = normalizeOrderPickerLogin(entry?.login_cliente || entry?.loginCliente);
+  const userId = String(entry?.user_id || entry?.userId || '').trim();
+  const ownerEmail = String(entry?.owner_email || entry?.ownerEmail || '').trim();
 
   return {
     id: String(entry?.id || `${numeroVenda}-${parsedDate || Date.now()}`),
+    userId,
+    ownerEmail,
+    responsavel: getHubUserDisplayName(userId, ownerEmail),
     loginCliente: loginCliente || 'Sem login identificado',
     loginKey: getOrderPickerSearchKey(loginCliente),
     numeroVenda,
@@ -3037,7 +3170,8 @@ async function loadOrderPickerHistory(force = false) {
 
   orderPickerHistoryLoading = true;
   try {
-    const rows = await sbFetch(`/rest/v1/${ORDER_PICKER_TABLE}?user_id=eq.${auth.user.id}&order=selected_at.desc&select=id,login_cliente,numero_venda,url,selected_at,created_at`);
+    await loadHubUserProfiles(force);
+    const rows = await sbFetch(`/rest/v1/${ORDER_PICKER_TABLE}?order=selected_at.desc&select=id,user_id,owner_email,login_cliente,numero_venda,url,selected_at,created_at`);
     orderPickerHistoryCache = normalizeOrderPickerHistory(rows);
     orderPickerHistoryLoaded = true;
     return orderPickerHistoryCache;
@@ -3058,6 +3192,7 @@ async function saveOrderPickerHistoryEntries(entries) {
       if (!numeroVenda) return null;
       return {
         user_id: auth.user.id,
+        owner_email: auth.user?.email || '',
         login_cliente: normalizeOrderPickerLogin(entry?.loginCliente) || 'Sem login identificado',
         numero_venda: numeroVenda,
         url: typeof entry?.url === 'string' ? entry.url : getOrderDetailUrl(numeroVenda),
@@ -3256,13 +3391,15 @@ function renderOrderPickerSessionState(panel) {
   const searchInputs = panel ? Array.from(panel.querySelectorAll('.sp-order-search-grid input')) : [];
   const refreshButton = panel?.querySelector('#sp-order-refresh');
   const clearButton = panel?.querySelector('#sp-order-clear');
+  const ownEntryCount = orderPickerHistoryCache.filter((entry) => String(entry.userId || '') === String(auth.user?.id || '')).length;
   if (!sessionBox) return;
 
   if (hasAuthSession()) {
     sessionBox.innerHTML = `
       <div class="sp-order-session__copy">
         <span>Conta do Hub</span>
-        <strong>${escapeHtml(auth.user?.email || 'Conta conectada')}</strong>
+        <strong>${escapeHtml(getAuthUserDisplayName())}</strong>
+        <small>${escapeHtml(auth.user?.email || '')}</small>
       </div>
     `;
   } else {
@@ -3280,7 +3417,7 @@ function renderOrderPickerSessionState(panel) {
   if (quantityInput) quantityInput.disabled = disabled;
   if (runButton) runButton.disabled = disabled;
   if (refreshButton) refreshButton.disabled = disabled;
-  if (clearButton) clearButton.disabled = disabled || orderPickerHistoryCache.length === 0;
+  if (clearButton) clearButton.disabled = disabled || ownEntryCount === 0;
   searchInputs.forEach((input) => { input.disabled = disabled; });
 }
 
@@ -3289,7 +3426,9 @@ function buildOrderPickerHistoryItem(entry) {
   const safeVenda = escapeHtml(entry.numeroVenda);
   const safeDate = escapeHtml(formatOrderPickerDate(entry.selectedAt));
   const safeUrl = escapeHtml(entry.url || getOrderDetailUrl(entry.numeroVenda));
+  const safeResponsavel = escapeHtml(entry.responsavel || 'Usuário do Hub');
 
+  const canDelete = String(entry.userId || '') === String(auth.user?.id || '');
   return `
     <article class="sp-order-history-item">
       <div class="sp-order-history-item__head">
@@ -3299,10 +3438,10 @@ function buildOrderPickerHistoryItem(entry) {
         </div>
         <div class="sp-order-history-item__actions">
           <a href="${safeUrl}" target="_blank" rel="noopener noreferrer" class="sp-order-action sp-order-action--open">Abrir</a>
-          <button type="button" class="sp-order-action sp-order-action--delete" data-order-history-delete="${escapeHtml(entry.id)}">Excluir</button>
+          ${canDelete ? `<button type="button" class="sp-order-action sp-order-action--delete" data-order-history-delete="${escapeHtml(entry.id)}">Excluir</button>` : ''}
         </div>
       </div>
-      <p class="sp-order-history-item__meta">${safeDate}</p>
+      <p class="sp-order-history-item__meta">Responsável: ${safeResponsavel} • ${safeDate}</p>
     </article>
   `;
 }
@@ -3349,7 +3488,7 @@ function renderOrderPickerDashboard(panel = document.getElementById('sp-order-pa
     historyTitle.textContent = 'Histórico de pedidos';
   }
   if (clearButton) {
-    clearButton.disabled = !hasAuthSession() || orderPickerHistoryCache.length === 0;
+    clearButton.disabled = !hasAuthSession() || !orderPickerHistoryCache.some((entry) => String(entry.userId || '') === String(auth.user?.id || ''));
   }
 
   if (!hasAuthSession()) {
@@ -3375,8 +3514,9 @@ function renderOrderPickerDashboard(panel = document.getElementById('sp-order-pa
     searchResult.dataset.tone = 'info';
     searchResult.innerHTML = '<p>Busque pelo login do comprador e/ou pelo número da venda.</p>';
   } else if (matches.length > 0) {
+    const responsaveis = [...new Set(matches.map((entry) => entry.responsavel).filter(Boolean))].slice(0, 4);
     searchResult.dataset.tone = 'success';
-    searchResult.innerHTML = `<p>${matches.length} registro(s) encontrado(s) para o filtro informado.</p>`;
+    searchResult.innerHTML = `<p>${matches.length} registro(s) encontrado(s) para o filtro informado.</p>${responsaveis.length ? `<p>Responsável(eis): ${escapeHtml(responsaveis.join(', '))}</p>` : ''}`;
   } else {
     searchResult.dataset.tone = 'error';
     searchResult.innerHTML = '<p>Nenhum registro encontrado para esse filtro.</p>';
@@ -3517,8 +3657,8 @@ function createOrderPickerPanel() {
       setOrderPickerStatus('Faça login no Hub para limpar o histórico.', 'error');
       return;
     }
-    if (!orderPickerHistoryCache.length) return;
-    if (!window.confirm('Deseja excluir todo o histórico do painel?')) return;
+    if (!orderPickerHistoryCache.some((entry) => String(entry.userId || '') === String(auth.user?.id || ''))) return;
+    if (!window.confirm('Deseja excluir todo o seu histórico do painel?')) return;
 
     try {
       await clearOrderPickerHistory();
@@ -4654,6 +4794,8 @@ if (document.readyState === 'loading') { document.addEventListener('DOMContentLo
 document.addEventListener('sp:auth-changed', async () => {
   try {
     if (hasAuthSession()) {
+      hubProfilesLoaded = false;
+      await loadHubUserProfiles(true);
       await initializePassoLargoForSession();
       await loadGestorLocalState();
       await loadGestorPendencias();
@@ -4673,6 +4815,8 @@ document.addEventListener('sp:auth-changed', async () => {
       gestorCopiedIds = new Set();
       gestorArchivedIds = new Set();
       gestorFefrelloSentIds = new Set();
+      hubProfilesCache = {};
+      hubProfilesLoaded = false;
       orderPickerHistoryCache = [];
       orderPickerHistoryLoaded = false;
       orderPickerHistoryLoading = false;
@@ -4742,13 +4886,25 @@ function clipTextHasComPedra(texto) {
   return /com\s+pedra/i.test(texto || '');
 }
 
-function clipShouldAppendComPedra({ tipo = '', index = -1, aroText = '', numeroAtual = '', modelo = '', fallbackModelo = '' }) {
+function clipShouldAppendComPedra({
+  tipo = '',
+  index = -1,
+  aroText = '',
+  numeroAtual = '',
+  modelo = '',
+  fallbackModelo = '',
+  contextHasStone = false,
+  totalCount = 0
+}) {
   const hasStoneOnAro = clipTextHasComPedra(aroText) || clipTextHasComPedra(numeroAtual);
   const hasStoneOnModel = clipModelHasPedra(modelo) || clipModelHasPedra(fallbackModelo);
+  const hasStoneContext = Boolean(contextHasStone);
+  const normalizedTotalCount = Number(totalCount) || 0;
 
   if (tipo === 'Masculino') return false;
-  if (tipo === 'Feminino') return hasStoneOnAro || hasStoneOnModel;
-  if (!tipo && index === 1) return hasStoneOnAro || hasStoneOnModel;
+  if (tipo === 'Feminino') return hasStoneOnAro || hasStoneOnModel || hasStoneContext;
+  if (!tipo && normalizedTotalCount <= 1) return hasStoneOnAro || hasStoneOnModel || hasStoneContext;
+  if (!tipo && index === 1) return hasStoneOnAro || hasStoneOnModel || hasStoneContext;
   return hasStoneOnAro;
 }
 
@@ -4800,7 +4956,13 @@ function clipNeedsFreshCapture(dados) {
   if (!dados.login) return true;
 
   const aros = Array.isArray(dados.aros) ? dados.aros : [];
-  return aros.some((aro) => aro?.tipo === 'Masculino' && clipTextHasComPedra(aro?.numero || ''));
+
+  if (aros.some((aro) => aro?.tipo === 'Masculino' && clipTextHasComPedra(aro?.numero || ''))) return true;
+
+  const pageText = document.body?.innerText || '';
+  if (clipTextHasComPedra(pageText) && aros.some((aro) => !aro?.tipo && !clipTextHasComPedra(String(aro?.numero || '')))) return true;
+
+  return false;
 }
 
 function capturarDados() {
@@ -4848,8 +5010,10 @@ function capturarDados() {
   function hasComPedraNearby(index, fallbackText = '') {
     if (clipTextHasComPedra(fallbackText)) return true;
     if (index >= 0) {
-      for (let j = Math.max(0, index - 3); j <= Math.min(linhas.length - 1, index + 3); j += 1) {
-        if (clipTextHasComPedra(linhas[j])) return true;
+      for (let j = index; j <= Math.min(linhas.length - 1, index + 3); j += 1) {
+        const currentLine = linhas[j];
+        if (j > index && /\b(Aro\s*-|Masculino\s*[-–]|Feminino\s*[-–])/.test(currentLine)) break;
+        if (clipTextHasComPedra(currentLine)) return true;
       }
     }
     return false;
@@ -4879,26 +5043,46 @@ function capturarDados() {
   const padroesAro = textoCompleto.match(/Aro\s*-\s*([^\n|]+)/g);
 
   if (padroesAro && padroesAro.length > 0) {
+    const totalAroEntries = padroesAro.reduce((total, match) => {
+      const textoAro = match.replace(/Aro\s*-\s*/, '').trim();
+      const numberMatches = Array.from(textoAro.matchAll(/(\d+(?:\.\d+)?)/g)).length;
+      return total + (numberMatches || 1);
+    }, 0);
     padroesAro.forEach((match, index) => {
       const textoAro = match.replace(/Aro\s*-\s*/, '').trim();
       const numeroMatch = textoAro.match(/(\d+(?:\.\d+)?)/);
       const numeroBase = numeroMatch ? numeroMatch[1] : '';
       const matchIndex = findLineIndexByOccurrence(match, index);
       const modeloAro = extractModeloNearby(matchIndex) || modelo;
+      const contextHasStoneNearby = hasComPedraNearby(matchIndex, textoAro);
       const shouldAppendStone = clipShouldAppendComPedra({
         index,
         aroText: textoAro,
+        contextHasStone: contextHasStoneNearby,
         modelo: modeloAro,
-        fallbackModelo: modelo
-      }) || (index === 1 && modeloTemPedra);
+        fallbackModelo: modelo,
+        totalCount: totalAroEntries
+      }) || (index === 1 && modeloTemPedra) || contextHasStoneNearby;
       const numero = clipRemoveComPedra(numeroBase);
       arosAvulsos.push({
         numero: shouldAppendStone ? `${numero} com pedra` : numero,
         modelo: modeloAro || modelo
       });
     });
+
+    if (modeloTemPedra && arosAvulsos.length === 2) {
+      const n0 = parseFloat(clipRemoveComPedra(arosAvulsos[0].numero)) || Infinity;
+      const n1 = parseFloat(clipRemoveComPedra(arosAvulsos[1].numero)) || Infinity;
+      const femIdx = n0 <= n1 ? 0 : 1;
+      const aro = arosAvulsos[femIdx];
+      if (!clipTextHasComPedra(aro.numero)) {
+        const base = clipRemoveComPedra(aro.numero);
+        if (base) arosAvulsos[femIdx] = { ...aro, numero: `${base} com pedra` };
+      }
+    }
   } else {
     const textoAroMasculino = extractCoupleAroText('Masculino');
+    const linhaAroMasculino = findLineByRegex(/Masculino\s*[-–]\s*/i);
     let aroMasculino = '';
     if (textoAroMasculino) {
       const textoAro = textoAroMasculino;
@@ -4907,6 +5091,7 @@ function capturarDados() {
       aroMasculino = clipRemoveComPedra(numeroBase);
     }
     const textoAroFeminino = extractCoupleAroText('Feminino');
+    const linhaAroFeminino = findLineByRegex(/Feminino\s*[-–]\s*/i);
     let aroFeminino = '';
     if (textoAroFeminino) {
       const textoAro = textoAroFeminino;
@@ -4916,6 +5101,7 @@ function capturarDados() {
       aroFeminino = clipShouldAppendComPedra({
         tipo: 'Feminino',
         aroText: textoAro,
+        contextHasStone: hasComPedraNearby(linhaAroFeminino.index, textoAro) || hasComPedraNearby(linhaAroMasculino.index, textoAroMasculino),
         modelo
       }) ? `${numero} com pedra` : numero;
     }
@@ -4929,11 +5115,14 @@ function capturarDados() {
 
 function formatarTextoParaCopia(dados) {
   let texto = `${dados.url}\n\n${dados.modelo || ''}\n`;
+  let ultimoTipo = '';
   dados.aros.filter(a => a.tipo).forEach(aro => {
+    if (ultimoTipo === 'Masculino' && aro.tipo === 'Feminino') texto += '\n';
     const numero = aro.numero || '';
     const valor = aro.valor || '';
     if (valor) { texto += `${aro.tipo} ${numero} >>                    ${valor}\n`; }
     else { texto += `${aro.tipo} ${numero}\n`; }
+    ultimoTipo = aro.tipo;
   });
   const avulsos = dados.aros.filter(a => !a.tipo);
   avulsos.forEach((aro, i) => {
@@ -5401,7 +5590,11 @@ async function mostrarPopup() {
   dados.aros.forEach((aro, index) => { arosHTML += criarInterfaceAro(aro, index, isAvulso); });
 
   if (dados.aros.length === 0) {
-    const femininoFallback = /pedra/i.test(dados.modelo || '') ? ' com pedra' : '';
+    const femininoFallback = clipShouldAppendComPedra({
+      tipo: 'Feminino',
+      modelo: dados.modelo || '',
+      contextHasStone: clipTextHasComPedra(document.body?.innerText || '')
+    }) ? ' com pedra' : '';
     arosHTML = `
       <div style="margin-bottom:8px;padding:10px;border:1px solid rgba(255,255,255,0.08);border-radius:12px;background:rgba(255,255,255,0.04);">
         <span style="display:inline-block;padding:2px 8px;border-radius:20px;font-size:9px;font-weight:700;letter-spacing:1px;color:white;background:#6366f1;margin-bottom:8px;text-transform:uppercase;">Masculino</span>
@@ -5718,15 +5911,17 @@ function coletarDadosDaInterface(dadosOriginais) {
       const campoModeloAro = document.getElementById(`campo-modelo-aro-${index}`);
       if (campoAro) {
         const modeloAro = campoModeloAro ? campoModeloAro.value : aro.modelo;
+        const numeroBase = clipRemoveComPedra(campoAro.value);
         const reforcoPedra = clipShouldAppendComPedra({
           tipo: aro.tipo,
           index,
           aroText: campoAro.value || '',
           numeroAtual: aro.numero || '',
           modelo: modeloAro,
-          fallbackModelo: modeloTemPedra ? modelo : ''
+          fallbackModelo: modeloTemPedra ? modelo : '',
+          contextHasStone: clipTextHasComPedra(document.body?.innerText || '') && !numeroBase,
+          totalCount: dadosOriginais.aros.length
         });
-        const numeroBase = clipRemoveComPedra(campoAro.value);
         aros.push({
           numero: reforcoPedra ? `${numeroBase} com pedra` : numeroBase,
           valor: campoValor ? campoValor.value.trim() : '',
@@ -5748,12 +5943,14 @@ function coletarDadosDaInterface(dadosOriginais) {
       tipo: 'Masculino',
       modelo
     });
-    aros.push({
-      numero: clipShouldAppendComPedra({
-        tipo: 'Feminino',
-        aroText: campoAroFem ? campoAroFem.value.trim() : '',
-        modelo
-      }) ? `${numeroFemBase} com pedra` : numeroFemBase,
+      aros.push({
+        numero: clipShouldAppendComPedra({
+          tipo: 'Feminino',
+          aroText: campoAroFem ? campoAroFem.value.trim() : '',
+          contextHasStone: clipTextHasComPedra(document.body?.innerText || ''),
+          modelo,
+          totalCount: 2
+        }) ? `${numeroFemBase} com pedra` : numeroFemBase,
       valor: campoValorFem ? campoValorFem.value.trim() : '',
       tipo: 'Feminino',
       modelo
