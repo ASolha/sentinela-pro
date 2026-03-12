@@ -1136,6 +1136,19 @@ function createTopBar() {
   const btnGestor  = bar.querySelector('#sp-btn-gestor');
   const btnAuth    = bar.querySelector('#sp-btn-auth');
 
+  function animateCounterRefreshButton() {
+    if (!btnCounter) return;
+    btnCounter.classList.remove('sp-spinning');
+    void btnCounter.offsetWidth;
+    btnCounter.classList.add('sp-spinning');
+  }
+
+  btnCounter?.addEventListener('animationend', (event) => {
+    if (event.animationName === 'sp-counter-spin') {
+      btnCounter.classList.remove('sp-spinning');
+    }
+  });
+
   // ── Button handlers ──────────────────────────────────────────
 
   // Passo Largo — toggle
@@ -1162,10 +1175,11 @@ function createTopBar() {
 
   // Counter — recarrega todas as abas ML relevantes
   btnCounter.addEventListener('click', () => {
-    if (btnCounter.classList.contains('sp-spinning')) return;
-    btnCounter.classList.add('sp-spinning');
+    if (btnCounter.dataset.refreshing === 'true') return;
+    btnCounter.dataset.refreshing = 'true';
+    animateCounterRefreshButton();
     chrome.runtime.sendMessage({ action: 'refreshAllTabs' }, (r) => {
-      btnCounter.classList.remove('sp-spinning');
+      btnCounter.dataset.refreshing = 'false';
       if (r?.success) {
         mostrarNotificacao(`${r.count} aba${r.count !== 1 ? 's' : ''} recarregada${r.count !== 1 ? 's' : ''}!`);
       }
