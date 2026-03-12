@@ -37,6 +37,10 @@ let orderPickerCurrentView = 'picker';
 let orderPickerHistoryCache = [];
 let orderPickerHistoryLoaded = false;
 let orderPickerHistoryLoading = false;
+let orderPickerSearchResults = [];
+let orderPickerSearchQueryKey = '';
+let orderPickerSearchLoading = false;
+let orderPickerSearchRequestId = 0;
 let hubProfilesCache = {};
 let hubProfilesLoaded = false;
 
@@ -3174,9 +3178,13 @@ function normalizeOrderPickerHistory(entries) {
 
 async function loadOrderPickerHistory(force = false) {
   if (!hasAuthSession()) {
+    orderPickerSearchRequestId += 1;
     orderPickerHistoryCache = [];
     orderPickerHistoryLoaded = true;
     orderPickerHistoryLoading = false;
+    orderPickerSearchResults = [];
+    orderPickerSearchQueryKey = '';
+    orderPickerSearchLoading = false;
     return [];
   }
 
@@ -3185,12 +3193,57 @@ async function loadOrderPickerHistory(force = false) {
   orderPickerHistoryLoading = true;
   try {
     await loadHubUserProfiles(force);
-    const rows = await sbFetch(`/rest/v1/${ORDER_PICKER_TABLE}?order=selected_at.desc&select=id,user_id,owner_email,login_cliente,numero_venda,url,selected_at,created_at`);
+    const rows = await sbFetch(`/rest/v1/${ORDER_PICKER_TABLE}?user_id=eq.${auth.user.id}&order=selected_at.desc&select=id,user_id,owner_email,login_cliente,numero_venda,url,selected_at,created_at`);
     orderPickerHistoryCache = normalizeOrderPickerHistory(rows);
     orderPickerHistoryLoaded = true;
     return orderPickerHistoryCache;
   } finally {
     orderPickerHistoryLoading = false;
+  }
+}
+
+async function searchOrderPickerHistory(loginTerm, saleTerm, force = false) {
+  const queryKey = getOrderPickerSearchQueryKey(loginTerm, saleTerm);
+  const normalizedLogin = String(loginTerm || '').trim();
+  const normalizedSale = normalizeOrderPickerSaleNumber(saleTerm);
+
+  if (!queryKey.replace(/:/g, '')) {
+    orderPickerSearchRequestId += 1;
+    orderPickerSearchResults = [];
+    orderPickerSearchQueryKey = '';
+    orderPickerSearchLoading = false;
+    return [];
+  }
+
+  if (!hasAuthSession()) return [];
+
+  if (!force && orderPickerSearchQueryKey === queryKey) {
+    return orderPickerSearchResults;
+  }
+
+  const requestId = ++orderPickerSearchRequestId;
+  orderPickerSearchLoading = true;
+
+  try {
+    await loadHubUserProfiles(force);
+    const rows = await sbFetch('/rest/v1/rpc/search_order_picker_history', {
+      method: 'POST',
+      body: JSON.stringify({
+        p_login: normalizedLogin || null,
+        p_sale: normalizedSale || null,
+        p_limit: 40
+      })
+    });
+    const normalizedRows = normalizeOrderPickerHistory(rows);
+    if (requestId === orderPickerSearchRequestId) {
+      orderPickerSearchResults = normalizedRows;
+      orderPickerSearchQueryKey = queryKey;
+    }
+    return normalizedRows;
+  } finally {
+    if (requestId === orderPickerSearchRequestId) {
+      orderPickerSearchLoading = false;
+    }
   }
 }
 
@@ -3291,6 +3344,15 @@ function getOrderPickerPeriodStart(period, referenceDate = new Date()) {
 
 function countUniqueOrderPickerSales(entries) {
   return new Set(entries.map((entry) => entry.numeroVenda)).size;
+}
+
+function getOwnOrderPickerHistoryEntries() {
+  const currentUserId = String(auth.user?.id || '');
+  return orderPickerHistoryCache.filter((entry) => String(entry.userId || '') === currentUserId);
+}
+
+function getOrderPickerSearchQueryKey(loginTerm, saleTerm) {
+  return `${getOrderPickerSearchKey(loginTerm)}::${normalizeOrderPickerSaleNumber(saleTerm)}`;
 }
 
 function getOrderPickerSummary(entries) {
@@ -3405,7 +3467,7 @@ function renderOrderPickerSessionState(panel) {
   const searchInputs = panel ? Array.from(panel.querySelectorAll('.sp-order-search-grid input')) : [];
   const refreshButton = panel?.querySelector('#sp-order-refresh');
   const clearButton = panel?.querySelector('#sp-order-clear');
-  const ownEntryCount = orderPickerHistoryCache.filter((entry) => String(entry.userId || '') === String(auth.user?.id || '')).length;
+  const ownEntryCount = getOwnOrderPickerHistoryEntries().length;
   if (!sessionBox) return;
 
   if (hasAuthSession()) {
@@ -3489,7 +3551,12 @@ function renderOrderPickerDashboard(panel = document.getElementById('sp-order-pa
 
   renderOrderPickerSessionState(panel);
 
-  const summary = getOrderPickerSummary(orderPickerHistoryCache);
+  const ownEntries = getOwnOrderPickerHistoryEntries();
+  const loginTerm = String(searchLoginInput?.value || '').trim();
+  const saleTerm = String(searchSaleInput?.value || '').trim();
+  const hasFilter = Boolean(loginTerm || saleTerm);
+  const searchEntries = hasFilter ? orderPickerSearchResults : [];
+  const summary = getOrderPickerSummary(ownEntries);
   metrics.innerHTML = summary.map((item) => `
     <article class="sp-order-metric">
       <span>${item.label}</span>
@@ -3499,10 +3566,10 @@ function renderOrderPickerDashboard(panel = document.getElementById('sp-order-pa
   `).join('');
 
   if (historyTitle) {
-    historyTitle.textContent = 'Histórico de pedidos';
+    historyTitle.textContent = hasFilter ? 'Resultado da busca' : 'Histórico dos seus pedidos';
   }
   if (clearButton) {
-    clearButton.disabled = !hasAuthSession() || !orderPickerHistoryCache.some((entry) => String(entry.userId || '') === String(auth.user?.id || ''));
+    clearButton.disabled = !hasAuthSession() || ownEntries.length === 0;
   }
 
   if (!hasAuthSession()) {
@@ -3519,25 +3586,27 @@ function renderOrderPickerDashboard(panel = document.getElementById('sp-order-pa
     return;
   }
 
-  const loginTerm = String(searchLoginInput?.value || '').trim();
-  const saleTerm = String(searchSaleInput?.value || '').trim();
-  const hasFilter = Boolean(loginTerm || saleTerm);
-  const matches = getOrderPickerSearchMatches(orderPickerHistoryCache, loginTerm, saleTerm);
-
   if (!hasFilter) {
     searchResult.dataset.tone = 'info';
-    searchResult.innerHTML = '<p>Busque pelo login do comprador e/ou pelo número da venda.</p>';
-  } else if (matches.length > 0) {
-    const responsaveis = [...new Set(matches.map((entry) => entry.responsavel).filter(Boolean))].slice(0, 4);
+    searchResult.innerHTML = '<p>Mostrando apenas o seu histórico. Use login ou venda para buscar em todos os usuários.</p>';
+    const groups = getOrderPickerHistoryGroups(ownEntries.slice(0, 40));
+    historyList.innerHTML = groups.length
+      ? groups.map(buildOrderPickerHistoryGroup).join('')
+      : '<p class="sp-order-empty">Nenhum pedido registrado por você ainda.</p>';
+    return;
+  } else if (orderPickerSearchLoading) {
+    searchResult.dataset.tone = 'info';
+    searchResult.innerHTML = '<p>Buscando registros nos outros usuários...</p>';
+  } else if (searchEntries.length > 0) {
+    const responsaveis = [...new Set(searchEntries.map((entry) => entry.responsavel).filter(Boolean))].slice(0, 4);
     searchResult.dataset.tone = 'success';
-    searchResult.innerHTML = `<p>${matches.length} registro(s) encontrado(s) para o filtro informado.</p>${responsaveis.length ? `<p>Responsável(eis): ${escapeHtml(responsaveis.join(', '))}</p>` : ''}`;
+    searchResult.innerHTML = `<p>${searchEntries.length} registro(s) encontrado(s) para o filtro informado.</p>${responsaveis.length ? `<p>Responsável(eis): ${escapeHtml(responsaveis.join(', '))}</p>` : ''}`;
   } else {
     searchResult.dataset.tone = 'error';
     searchResult.innerHTML = '<p>Nenhum registro encontrado para esse filtro.</p>';
   }
 
-  const visibleEntries = (hasFilter ? matches : orderPickerHistoryCache).slice(0, 40);
-  const groups = getOrderPickerHistoryGroups(visibleEntries);
+  const groups = getOrderPickerHistoryGroups(searchEntries.slice(0, 40));
   historyList.innerHTML = groups.length
     ? groups.map(buildOrderPickerHistoryGroup).join('')
     : '<p class="sp-order-empty">Nenhum pedido registrado ainda.</p>';
@@ -3546,22 +3615,48 @@ function renderOrderPickerDashboard(panel = document.getElementById('sp-order-pa
 async function refreshOrderPickerDashboard(panel = document.getElementById('sp-order-panel'), force = false) {
   if (!panel) return;
 
+  const searchLoginInput = panel.querySelector('#sp-order-search-login');
+  const searchSaleInput = panel.querySelector('#sp-order-search-sale');
+  const searchResult = panel.querySelector('#sp-order-search-result');
+  const historyList = panel.querySelector('#sp-order-history-list');
+  const loginTerm = String(searchLoginInput?.value || '').trim();
+  const saleTerm = String(searchSaleInput?.value || '').trim();
+  const hasFilter = Boolean(loginTerm || saleTerm);
+
   if (hasAuthSession()) {
     try {
       await loadOrderPickerHistory(force);
+      if (hasFilter) {
+        if (searchResult) {
+          searchResult.dataset.tone = 'info';
+          searchResult.innerHTML = '<p>Buscando registros nos outros usuários...</p>';
+        }
+        if (historyList) {
+          historyList.innerHTML = '<p class="sp-order-empty">Consultando o histórico compartilhado.</p>';
+        }
+        await searchOrderPickerHistory(loginTerm, saleTerm, force);
+      } else {
+        orderPickerSearchRequestId += 1;
+        orderPickerSearchResults = [];
+        orderPickerSearchQueryKey = '';
+        orderPickerSearchLoading = false;
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setOrderPickerStatus(message, 'error');
-      const searchResult = panel.querySelector('#sp-order-search-result');
       if (searchResult) {
         searchResult.dataset.tone = 'error';
         searchResult.innerHTML = `<p>${escapeHtml(message)}</p>`;
       }
     }
   } else {
+    orderPickerSearchRequestId += 1;
     orderPickerHistoryCache = [];
     orderPickerHistoryLoaded = true;
     orderPickerHistoryLoading = false;
+    orderPickerSearchResults = [];
+    orderPickerSearchQueryKey = '';
+    orderPickerSearchLoading = false;
   }
 
   renderOrderPickerDashboard(panel);
@@ -3636,6 +3731,7 @@ function createOrderPickerPanel() {
   const refreshButton = panel.querySelector('#sp-order-refresh');
   const clearButton = panel.querySelector('#sp-order-clear');
   const historyList = panel.querySelector('#sp-order-history-list');
+  let searchRefreshTimeout = null;
 
   loadOrderPickerQuantity(quantityInput);
   renderOrderPickerSessionState(panel);
@@ -3661,7 +3757,13 @@ function createOrderPickerPanel() {
     }
   });
   panel.querySelectorAll('.sp-order-search-grid input').forEach((input) => {
-    input.addEventListener('input', () => renderOrderPickerDashboard(panel));
+    input.addEventListener('input', () => {
+      if (searchRefreshTimeout) clearTimeout(searchRefreshTimeout);
+      searchRefreshTimeout = setTimeout(() => {
+        searchRefreshTimeout = null;
+        void refreshOrderPickerDashboard(panel);
+      }, 250);
+    });
   });
   refreshButton.addEventListener('click', () => {
     void refreshOrderPickerDashboard(panel, true);
@@ -3866,6 +3968,31 @@ function stopMonitoring() {
   if (existingNotif) existingNotif.remove();
 }
 
+function isOrderDetailMonitoringPage() {
+  const isMercadoLivre =
+    window.location.hostname.includes('mercadolivre.com.br') ||
+    window.location.hostname.includes('mercadolibre.com');
+
+  return isMercadoLivre && /\/vendas\/\d+\/detalhe/i.test(window.location.pathname);
+}
+
+function getCurrentMonitoringOrderId() {
+  const urlMatch = window.location.pathname.match(/\/vendas\/(\d+)\/detalhe/i);
+  if (urlMatch?.[1]) return urlMatch[1];
+
+  const titleText = document.querySelector('.left-column__pack-id[aria-label^="#"]')?.getAttribute('aria-label')
+    || document.querySelector('.left-column__pack-id')?.textContent
+    || document.querySelector('.sc-detail-title__text')?.textContent
+    || '';
+  const match = String(titleText).match(/#?\s*(\d{6,})/);
+  return match?.[1] || '';
+}
+
+function getTwoUnitsQuantityElements() {
+  return Array.from(document.querySelectorAll('.sc-quantity.sc-quantity__unique span, .sc-quantity__unique span'))
+    .filter((element) => /(^|\s)2 unidades\b/i.test(element?.textContent || ''));
+}
+
 function checkForOrders() {
   if (!isMonitoring) return;
   let foundCases = [];
@@ -3873,38 +4000,11 @@ function checkForOrders() {
   try {
     const currentContent = document.body.innerText;
     if (currentContent !== lastProcessedContent) {
-      const pageText = currentContent.toLowerCase();
-      if (pageText.includes('2 unidades')) {
-        const orderPatterns = [
-          /venda\s*#\s*(\d+)/gi, /pedido\s*#\s*(\d+)/gi, /ordem\s*#\s*(\d+)/gi,
-          /venda\s*(\d{4,})/gi, /pedido\s*(\d{4,})/gi
-        ];
-        let foundOrders = [];
-        const fullText = document.body.innerText;
-        orderPatterns.forEach(pattern => {
-          let match;
-          while ((match = pattern.exec(fullText)) !== null) {
-            if (!foundOrders.includes(match[0])) foundOrders.push(match[0]);
-          }
-        });
-        const selectors = [
-          '[class*="order"]', '[class*="venda"]', '[class*="pedido"]', '[id*="order"]',
-          '[id*="venda"]', '[id*="pedido"]', 'h1, h2, h3, h4, h5, h6', '.title, .header, .info'
-        ];
-        selectors.forEach(selector => {
-          document.querySelectorAll(selector).forEach(element => {
-            orderPatterns.forEach(pattern => {
-              let match;
-              while ((match = pattern.exec(element.textContent)) !== null) {
-                if (!foundOrders.includes(match[0])) foundOrders.push(match[0]);
-              }
-            });
-          });
-        });
-        foundOrders.forEach(orderNumber => {
-          const elementHash = hashCode(currentContent + orderNumber + window.location.href);
-          chrome.runtime.sendMessage({ action: 'orderFound', orderNumber, elementHash }).catch(() => {});
-        });
+      const currentOrderId = getCurrentMonitoringOrderId();
+      const quantityElements = isOrderDetailMonitoringPage() ? getTwoUnitsQuantityElements() : [];
+      if (currentOrderId && quantityElements.length > 0) {
+        const elementHash = hashCode(`${currentOrderId}:${window.location.href}`);
+        chrome.runtime.sendMessage({ action: 'orderFound', orderNumber: currentOrderId, elementHash }).catch(() => {});
       }
       lastProcessedContent = currentContent;
     }
