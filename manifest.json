@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Sentinela Pro",
-  "version": "1.6",
+  "version": "1.7",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAp3RDDgGxMkABtZf4WNdIsBlM33OjWj0lPDzP5Vc43NtSaiPSYEyEqVCCJgQKlzoIWRefPJIJYLX8tf/7PxwtXLrEngUO78t7dhqOsxEFc/KfAN/484rzUrTGIDGKGC+7pTQAIzPkF7iHHJ+x42MBk/8lOzFnKO3hqVRGUsq6kfwHi/ppiOKnbIZHvKJwX8JWtdD2dc/+7TpBHHu6Blown3zB5Yt/izgWQq7VOw+KU79e3B1R1m8wU+bSUNqTEtFkqYr467neMZruKgxZgECjcK9oztWHLkUr682Dd1fMp/hm/7Oh4E8gVFIVQCPRPxYG6LvYKrygXz7Mi2dYXnB0iwIDAQAB",
   "description": "Monitoramento ML + Mensagens Rápidas (Passo Largo) + Captura de Dados (Clip)",
   "icons": {
