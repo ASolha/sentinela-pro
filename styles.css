@@ -538,22 +538,22 @@
 
 /* Clip — indigo/violet */
 #sp-btn-clip {
-  background: rgba(220, 38, 38, 0.14);
-  border-color: rgba(239, 68, 68, 0.38);
-  color: #fca5a5;
+  background: rgba(239, 68, 68, 0.22);
+  border-color: rgba(248, 113, 113, 0.58);
+  color: #f87171;
 }
 #sp-btn-clip:hover {
-  background: rgba(220, 38, 38, 0.24);
-  border-color: rgba(248, 113, 113, 0.72);
-  color: #fecaca;
-  box-shadow: 0 0 18px rgba(239, 68, 68, 0.34), 0 3px 10px rgba(0, 0, 0, 0.35);
+  background: rgba(239, 68, 68, 0.34);
+  border-color: rgba(252, 165, 165, 0.88);
+  color: #fee2e2;
+  box-shadow: 0 0 20px rgba(239, 68, 68, 0.48), 0 3px 10px rgba(0, 0, 0, 0.35);
   transform: translateY(-1px);
 }
 #sp-btn-clip.sp-active {
-  background: linear-gradient(180deg, rgba(220, 38, 38, 0.32) 0%, rgba(185, 28, 28, 0.3) 100%);
-  border-color: rgba(248, 113, 113, 0.82);
-  color: #fee2e2;
-  box-shadow: 0 0 22px rgba(239, 68, 68, 0.4);
+  background: linear-gradient(180deg, rgba(239, 68, 68, 0.46) 0%, rgba(185, 28, 28, 0.42) 100%);
+  border-color: rgba(254, 202, 202, 0.94);
+  color: #fff1f2;
+  box-shadow: 0 0 24px rgba(239, 68, 68, 0.58);
 }
 
 /* Counter — amber */
@@ -2503,17 +2503,17 @@
 }
 
 #sp-topbar.sp-theme-light #sp-btn-clip {
-  color: #b91c1c;
-  border-color: rgba(239, 68, 68, 0.32);
-  background: rgba(254, 242, 242, 0.98);
+  color: #991b1b;
+  border-color: rgba(239, 68, 68, 0.48);
+  background: rgba(254, 226, 226, 0.98);
 }
 
 #sp-topbar.sp-theme-light #sp-btn-clip:hover,
 #sp-topbar.sp-theme-light #sp-btn-clip.sp-active {
-  color: #991b1b;
-  border-color: rgba(239, 68, 68, 0.48);
-  background: linear-gradient(180deg, rgba(254, 226, 226, 0.98) 0%, rgba(254, 202, 202, 0.98) 100%);
-  box-shadow: 0 10px 24px rgba(239, 68, 68, 0.18);
+  color: #7f1d1d;
+  border-color: rgba(239, 68, 68, 0.68);
+  background: linear-gradient(180deg, rgba(254, 202, 202, 0.99) 0%, rgba(252, 165, 165, 0.98) 100%);
+  box-shadow: 0 10px 24px rgba(239, 68, 68, 0.26);
 }
 
 #sp-topbar.sp-theme-light #sp-btn-counter {

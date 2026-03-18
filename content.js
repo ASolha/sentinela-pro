@@ -1148,79 +1148,74 @@ function createTopBar() {
   bar.id = 'sp-topbar';
   applyHubTheme(bar);
 
-  const iconPasso = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-    <path d="M4.75 4.75h10.5A2.25 2.25 0 0 1 17.5 7v4.5a2.25 2.25 0 0 1-2.25 2.25H9.5L6 16.5v-2.75H4.75A2.25 2.25 0 0 1 2.5 11.5V7a2.25 2.25 0 0 1 2.25-2.25Z"/>
-    <path d="M6.75 8H13"/>
-    <path d="M6.75 10.75h4.5"/>
+  const iconPasso = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+    <path d="M9 10h6"/>
+    <path d="M9 13h4"/>
   </svg>`;
 
   const clipIconVariants = {
-    captureFrame: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M6 3.75H4.75A1.75 1.75 0 0 0 3 5.5v1.25"/>
-      <path d="M14 3.75h1.25A1.75 1.75 0 0 1 17 5.5v1.25"/>
-      <path d="M17 14.5v1.25a1.75 1.75 0 0 1-1.75 1.75H14"/>
-      <path d="M6 17.5H4.75A1.75 1.75 0 0 1 3 15.75V14.5"/>
-      <rect x="6.25" y="6.25" width="7.5" height="7.5" rx="1.75"/>
-      <circle cx="10" cy="10" r="1.3"/>
+    captureFrame: `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M3 7V5a2 2 0 0 1 2-2h2"/>
+      <path d="M17 3h2a2 2 0 0 1 2 2v2"/>
+      <path d="M21 17v2a2 2 0 0 1-2 2h-2"/>
+      <path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
+      <rect x="7" y="7" width="10" height="10" rx="1"/>
     </svg>`,
-    captureScan: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M6 4.25H4.75A1.75 1.75 0 0 0 3 6v1"/>
-      <path d="M14 4.25h1.25A1.75 1.75 0 0 1 17 6v1"/>
-      <path d="M17 13v1a1.75 1.75 0 0 1-1.75 1.75H14"/>
-      <path d="M6 15.75H4.75A1.75 1.75 0 0 1 3 14v-1"/>
-      <path d="M6.5 8.25h7"/>
-      <path d="M5.75 10h8.5"/>
-      <path d="M6.5 11.75h7"/>
+    captureScan: `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M3 7V5a2 2 0 0 1 2-2h2"/>
+      <path d="M17 3h2a2 2 0 0 1 2 2v2"/>
+      <path d="M21 17v2a2 2 0 0 1-2 2h-2"/>
+      <path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
+      <path d="M8 8h8"/>
+      <path d="M7 12h10"/>
+      <path d="M8 16h8"/>
     </svg>`,
-    captureCard: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-      <path d="M6 3.75H4.75A1.75 1.75 0 0 0 3 5.5v1.25"/>
-      <path d="M14 3.75h1.25A1.75 1.75 0 0 1 17 5.5v1.25"/>
-      <path d="M17 14.5v1.25a1.75 1.75 0 0 1-1.75 1.75H14"/>
-      <path d="M6 17.5H4.75A1.75 1.75 0 0 1 3 15.75V14.5"/>
-      <rect x="5.5" y="6" width="9" height="8" rx="1.75"/>
-      <path d="M7.5 8.5h5"/>
-      <path d="M7.5 10.75h3.25"/>
+    captureCard: `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M3 7V5a2 2 0 0 1 2-2h2"/>
+      <path d="M17 3h2a2 2 0 0 1 2 2v2"/>
+      <path d="M21 17v2a2 2 0 0 1-2 2h-2"/>
+      <path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
+      <rect x="6" y="8" width="12" height="8" rx="1.5"/>
+      <path d="M8.5 11h7"/>
+      <path d="M8.5 13.75h4"/>
     </svg>`
   };
   const iconClip = clipIconVariants.captureFrame;
 
   // ícone de abas do navegador (browser tabs)
-  const iconCounter = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-    <rect x="2.75" y="4" width="14.5" height="10.5" rx="1.75"/>
-    <path d="M2.75 7h14.5"/>
-    <path d="M7 16.25h6"/>
+  const iconCounter = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="2" y="7" width="20" height="14" rx="2"/>
+    <path d="M2 11h20"/>
+    <path d="M6 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
   </svg>`;
 
-  const iconOrders = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-    <path d="M5.25 5.75h.01"/>
-    <path d="M8 5.75h6.75"/>
-    <path d="M5.25 10h.01"/>
-    <path d="M8 10h6.75"/>
-    <path d="M5.25 14.25h.01"/>
-    <path d="M8 14.25h6.75"/>
+  const iconOrders = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M6 6h15"/>
+    <path d="M6 12h15"/>
+    <path d="M6 18h15"/>
+    <path d="M3 6h.01"/>
+    <path d="M3 12h.01"/>
+    <path d="M3 18h.01"/>
   </svg>`;
 
-  const iconHistory = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-    <path d="M4 5.75V3.5"/>
-    <path d="M4 3.5h2.25"/>
-    <path d="M4.8 6.2A6.75 6.75 0 1 1 3.25 10"/>
-    <path d="M10 6.25V10l2.25 1.5"/>
+  const iconHistory = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M3 3v5h5"/>
+    <path d="M3.05 13a9 9 0 1 0 .49-5.5L3 8"/>
+    <path d="M12 7v5l4 2"/>
   </svg>`;
 
-  const iconAccount = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-    <rect x="2.75" y="3.25" width="14.5" height="13.5" rx="1.75"/>
-    <circle cx="10" cy="8.25" r="2.25"/>
-    <path d="M6.75 13.75c.8-1.45 1.98-2.25 3.25-2.25s2.45.8 3.25 2.25"/>
+  const iconAccount = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+    <circle cx="12" cy="7" r="4"/>
   </svg>`;
 
-  const iconGestor = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-    <rect x="3" y="3.25" width="14" height="13.5" rx="1.75"/>
-    <path d="M6 6.75h.01"/>
-    <path d="M8.75 6.75H14"/>
-    <path d="M6 10h.01"/>
-    <path d="M8.75 10H14"/>
-    <path d="M6 13.25h.01"/>
-    <path d="M8.75 13.25h3.75"/>
+  const iconGestor = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="5" y="3" width="14" height="18" rx="2"/>
+    <path d="M9 3h6"/>
+    <path d="M8 8h8"/>
+    <path d="M8 12h4"/>
+    <path d="m9 17 2 2 4-4"/>
   </svg>`;
 
   bar.innerHTML = `
