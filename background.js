@@ -5,6 +5,12 @@ let isMonitoring = true;
 let notifiedOrders = new Set();
 let processedElements = new Set();
 const GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.send'];
+const CUSTOMER_HISTORY_CACHE_TTL = 5 * 60 * 1000;
+const CUSTOMER_HISTORY_LOOKUP_CONCURRENCY = 2;
+const customerHistoryCache = new Map();
+const customerHistoryPending = new Map();
+const customerHistoryQueue = [];
+let activeCustomerHistoryLookups = 0;
 
 // Clique no ícone da extensão não executa ações do hub.
 
@@ -89,6 +95,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false;
   }
 
+  if (message?.action === 'enqueueCustomerHistoryLookup') {
+    const login = normalizeCustomerHistoryLogin(message.login);
+    const saleNumber = normalizeCustomerHistorySaleNumber(message.saleNumber);
+    const requestId = String(message.requestId || '').trim();
+    const tabId = sender?.tab?.id;
+
+    if (!tabId || !login || !saleNumber || !requestId) {
+      sendResponse({ ok: false, error: 'Dados insuficientes para consultar recompra.' });
+      return false;
+    }
+
+    enqueueCustomerHistoryLookup(tabId, login, saleNumber, requestId);
+    sendResponse({ ok: true, queued: true });
+    return false;
+  }
+
   switch (message.action) {
     case 'orderFound':
       handleOrderFound(message.orderNumber, message.elementHash, sender.tab);
@@ -109,6 +131,145 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       break;
   }
 });
+
+function normalizeCustomerHistoryLogin(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeCustomerHistorySaleNumber(value) {
+  return String(value || '').replace(/\D+/g, '');
+}
+
+function decodeCustomerHistoryResults(results) {
+  return Array.isArray(results) ? results : [];
+}
+
+function getCustomerHistoryCache(login) {
+  const cached = customerHistoryCache.get(login);
+  if (!cached) return null;
+  if ((Date.now() - cached.timestamp) > CUSTOMER_HISTORY_CACHE_TTL) {
+    customerHistoryCache.delete(login);
+    return null;
+  }
+  return cached.results;
+}
+
+function setCustomerHistoryCache(login, results) {
+  customerHistoryCache.set(login, {
+    timestamp: Date.now(),
+    results: decodeCustomerHistoryResults(results)
+  });
+}
+
+function sendCustomerHistoryLookupResult(tabId, payload) {
+  chrome.tabs.sendMessage(tabId, {
+    action: 'customerHistoryLookupResult',
+    ...payload
+  }).catch(() => {});
+}
+
+function enqueueCustomerHistoryLookup(tabId, login, saleNumber, requestId) {
+  const cachedResults = getCustomerHistoryCache(login);
+  if (cachedResults) {
+    sendCustomerHistoryLookupResult(tabId, {
+      login,
+      saleNumber,
+      requestId,
+      results: cachedResults,
+      fromCache: true
+    });
+    return;
+  }
+
+  let entry = customerHistoryPending.get(login);
+  if (!entry) {
+    entry = {
+      login,
+      requests: new Map(),
+      status: 'queued'
+    };
+    customerHistoryPending.set(login, entry);
+    customerHistoryQueue.push(login);
+  }
+
+  entry.requests.set(`${tabId}:${saleNumber}`, {
+    tabId,
+    saleNumber,
+    requestId
+  });
+
+  drainCustomerHistoryQueue();
+}
+
+function drainCustomerHistoryQueue() {
+  while (activeCustomerHistoryLookups < CUSTOMER_HISTORY_LOOKUP_CONCURRENCY && customerHistoryQueue.length > 0) {
+    const login = customerHistoryQueue.shift();
+    const entry = customerHistoryPending.get(login);
+    if (!entry || entry.status === 'running') continue;
+    entry.status = 'running';
+    void processCustomerHistoryLookup(login);
+  }
+}
+
+async function processCustomerHistoryLookup(login) {
+  const entry = customerHistoryPending.get(login);
+  if (!entry) return;
+
+  activeCustomerHistoryLookups += 1;
+
+  try {
+    const results = await runCustomerHistoryLookup(entry);
+    setCustomerHistoryCache(login, results);
+    deliverCustomerHistoryLookup(entry, {
+      login,
+      results,
+      fromCache: false
+    });
+  } catch (error) {
+    deliverCustomerHistoryLookup(entry, {
+      login,
+      error: error instanceof Error ? error.message : String(error || 'Falha ao consultar recompra.'),
+      results: []
+    });
+  } finally {
+    customerHistoryPending.delete(login);
+    activeCustomerHistoryLookups = Math.max(0, activeCustomerHistoryLookups - 1);
+    drainCustomerHistoryQueue();
+  }
+}
+
+async function runCustomerHistoryLookup(entry) {
+  let lastError = new Error('Nenhuma aba disponivel para consultar recompra.');
+
+  for (const request of entry.requests.values()) {
+    try {
+      const response = await chrome.tabs.sendMessage(request.tabId, {
+        action: 'run_customer_history_lookup',
+        login: entry.login
+      });
+
+      if (response?.ok) {
+        return decodeCustomerHistoryResults(response.results);
+      }
+
+      lastError = new Error(response?.error || 'A aba nao conseguiu consultar os pedidos anteriores.');
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error || 'Falha na aba de consulta.'));
+    }
+  }
+
+  throw lastError;
+}
+
+function deliverCustomerHistoryLookup(entry, payload) {
+  entry.requests.forEach((request) => {
+    sendCustomerHistoryLookupResult(request.tabId, {
+      ...payload,
+      saleNumber: request.saleNumber,
+      requestId: request.requestId
+    });
+  });
+}
 
 async function handleOrderFound(orderNumber, elementHash, tab) {
   if (!isMonitoring) return;
@@ -241,6 +402,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 // Monitora mudanças de abas
 chrome.tabs.onCreated.addListener(updateBadgeAndNotify);
 chrome.tabs.onRemoved.addListener(updateBadgeAndNotify);
+chrome.tabs.onRemoved.addListener((tabId) => {
+  customerHistoryPending.forEach((entry, login) => {
+    entry.requests.forEach((request, key) => {
+      if (request.tabId === tabId) {
+        entry.requests.delete(key);
+      }
+    });
+
+    if (!entry.requests.size) {
+      customerHistoryPending.delete(login);
+    }
+  });
+});
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.title || changeInfo.status === 'complete') updateBadgeAndNotify();
 });

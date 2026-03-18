@@ -12,7 +12,11 @@ const ORDER_PICKER_TABLE = 'order_picker_history';
 const HUB_PROFILE_TABLE = 'hub_user_profiles';
 const HUB_SESSION_KEY = 'sp_hub_session';
 const HUB_BUTTON_ORDER_KEY = 'sp_hub_button_order';
-const HUB_DEFAULT_BUTTON_ORDER = ['passo', 'clip', 'counter', 'orders', 'gestor'];
+const HUB_DEFAULT_BUTTON_ORDER = ['passo', 'clip', 'counter', 'orders', 'history', 'gestor'];
+const CUSTOMER_HISTORY_SESSION_KEY = 'sp_customer_history_state';
+const CUSTOMER_HISTORY_POSITION_KEY = 'sp_customer_history_pos';
+const GESTOR_CAPTURE_SESSION_KEY = 'sp_gestor_capture_state';
+const ORDER_PICKER_DAY_SEQUENCE_KEY = 'sp_order_picker_day_sequence';
 const CFG = {
   supabaseUrl: 'https://dqiosohjicnruwrhxeou.supabase.co',
   supabaseKey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImRxaW9zb2hqaWNucnV3cmh4ZW91Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzI0OTI0NzcsImV4cCI6MjA4ODA2ODQ3N30.y5LVH3Lb9xDuHLDVvDaNCrzuS2RsJenI0EqgVtHBWfM'
@@ -41,8 +45,11 @@ let orderPickerSearchResults = [];
 let orderPickerSearchQueryKey = '';
 let orderPickerSearchLoading = false;
 let orderPickerSearchRequestId = 0;
+let orderPickerTodaySequence = [];
 let hubProfilesCache = {};
 let hubProfilesLoaded = false;
+let customerHistoryLookupSequence = 0;
+let authDisplayNameEditing = false;
 
 const GESTOR_IGNORE_MODEL_TERMS = [
   /pend[êe]ncia/i,
@@ -363,17 +370,80 @@ function buildGestorPairAros(aros = []) {
   ];
 }
 
+function createEmptyGestorCapturedState() {
+  return {
+    login_cliente: '',
+    numero_venda: '',
+    modelo: '',
+    url: '',
+    aro: '',
+    sourceUrl: '',
+    updatedAt: 0
+  };
+}
+
+function normalizeGestorCapturedState(data) {
+  const normalized = data && typeof data === 'object' ? data : {};
+  return {
+    login_cliente: String(normalized.login_cliente || '').trim(),
+    numero_venda: normalizeOrderPickerSaleNumber(normalized.numero_venda),
+    modelo: String(normalized.modelo || '').trim(),
+    url: String(normalized.url || '').trim(),
+    aro: String(normalized.aro || '').trim(),
+    sourceUrl: String(normalized.sourceUrl || normalized.url || '').trim(),
+    updatedAt: Number(normalized.updatedAt) || 0
+  };
+}
+
+function loadGestorCapturedState() {
+  try {
+    const raw = sessionStorage.getItem(GESTOR_CAPTURE_SESSION_KEY);
+    return normalizeGestorCapturedState(raw ? JSON.parse(raw) : null);
+  } catch (error) {
+    console.error('[Sentinela Pro] Erro ao carregar os dados capturados do Gestor:', error);
+    return createEmptyGestorCapturedState();
+  }
+}
+
+function saveGestorCapturedState(data) {
+  const normalized = normalizeGestorCapturedState(data);
+  try {
+    sessionStorage.setItem(GESTOR_CAPTURE_SESSION_KEY, JSON.stringify(normalized));
+  } catch (error) {
+    console.error('[Sentinela Pro] Erro ao salvar os dados capturados do Gestor:', error);
+  }
+  return normalized;
+}
+
+function mergeGestorCapturedState(currentData, storedData) {
+  const current = normalizeGestorCapturedState(currentData);
+  const stored = normalizeGestorCapturedState(storedData);
+  const sameSale = current.numero_venda && stored.numero_venda && current.numero_venda === stored.numero_venda;
+  const canReuseStoredDetails = sameSale || (!current.numero_venda && Boolean(stored.numero_venda));
+
+  return normalizeGestorCapturedState({
+    ...current,
+    login_cliente: current.login_cliente || (canReuseStoredDetails ? stored.login_cliente : ''),
+    numero_venda: current.numero_venda || stored.numero_venda,
+    modelo: current.modelo || (canReuseStoredDetails ? stored.modelo : ''),
+    url: current.url || window.location.href,
+    aro: parseGestorAros(current.aro).length ? current.aro : (canReuseStoredDetails ? stored.aro : ''),
+    sourceUrl: window.location.href,
+    updatedAt: Date.now()
+  });
+}
+
 function captureGestorPageData() {
   const url = window.location.href;
   const pageText = getGestorPageText();
   const clipData = clipSanitizeCapturedData(capturarDados());
   const loginCliente = clipData?.login || getGestorLoginFromPage(pageText);
 
-  let numeroVenda = '';
+  let numeroVenda = getCurrentCustomerHistorySaleNumber();
   const vendaMatch = pageText.match(/Venda\s*#\s*(\d+)/i);
-  if (vendaMatch) {
+  if (!numeroVenda && vendaMatch) {
     numeroVenda = vendaMatch[1];
-  } else {
+  } else if (!numeroVenda) {
     const orderNode = document.querySelector('[data-testid="order-number"], .order-number, [class*="order-id"]');
     if (orderNode?.textContent) {
       numeroVenda = orderNode.textContent.replace(/[^0-9]/g, '');
@@ -411,6 +481,7 @@ function hasGestorCapturedMeaningfulData(data) {
 }
 
 function getGestorCapturedPageData(force = false) {
+  const storedData = loadGestorCapturedState();
   if (!force && gestorCapturedData && gestorLastCaptureUrl === window.location.href && gestorCapturedData.login_cliente) {
     const pageText = document.body?.innerText || '';
     const cachedAros = parseGestorAros(gestorCapturedData.aro || '');
@@ -420,13 +491,22 @@ function getGestorCapturedPageData(force = false) {
     }
   }
 
-  const captured = captureGestorPageData();
+  const captured = mergeGestorCapturedState(captureGestorPageData(), storedData);
   if (hasGestorCapturedMeaningfulData(captured) || force || !gestorCapturedData || gestorLastCaptureUrl !== window.location.href) {
-    gestorCapturedData = captured;
+    gestorCapturedData = saveGestorCapturedState(captured);
     gestorLastCaptureUrl = window.location.href;
   }
 
-  return gestorCapturedData || captured;
+  return gestorCapturedData || storedData || captured;
+}
+
+function primeGestorCapturedSession(force = false) {
+  const captured = getGestorCapturedPageData(force);
+  if (hasGestorCapturedMeaningfulData(captured)) {
+    gestorCapturedData = saveGestorCapturedState(captured);
+    gestorLastCaptureUrl = window.location.href;
+  }
+  return gestorCapturedData;
 }
 
 function fillGestorForm(panel, force = false) {
@@ -1068,45 +1148,79 @@ function createTopBar() {
   bar.id = 'sp-topbar';
   applyHubTheme(bar);
 
-  const iconPasso = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-    <line x1="9" y1="10" x2="15" y2="10" stroke-width="1.8"/>
-    <line x1="9" y1="13" x2="13" y2="13" stroke-width="1.8"/>
+  const iconPasso = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M4.75 4.75h10.5A2.25 2.25 0 0 1 17.5 7v4.5a2.25 2.25 0 0 1-2.25 2.25H9.5L6 16.5v-2.75H4.75A2.25 2.25 0 0 1 2.5 11.5V7a2.25 2.25 0 0 1 2.25-2.25Z"/>
+    <path d="M6.75 8H13"/>
+    <path d="M6.75 10.75h4.5"/>
   </svg>`;
 
-  const iconClip = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M3 7V5a2 2 0 0 1 2-2h2"/>
-    <path d="M17 3h2a2 2 0 0 1 2 2v2"/>
-    <path d="M21 17v2a2 2 0 0 1-2 2h-2"/>
-    <path d="M7 21H5a2 2 0 0 1-2-2v-2"/>
-    <rect x="7" y="7" width="10" height="10" rx="1"/>
-  </svg>`;
+  const clipIconVariants = {
+    captureFrame: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M6 3.75H4.75A1.75 1.75 0 0 0 3 5.5v1.25"/>
+      <path d="M14 3.75h1.25A1.75 1.75 0 0 1 17 5.5v1.25"/>
+      <path d="M17 14.5v1.25a1.75 1.75 0 0 1-1.75 1.75H14"/>
+      <path d="M6 17.5H4.75A1.75 1.75 0 0 1 3 15.75V14.5"/>
+      <rect x="6.25" y="6.25" width="7.5" height="7.5" rx="1.75"/>
+      <circle cx="10" cy="10" r="1.3"/>
+    </svg>`,
+    captureScan: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M6 4.25H4.75A1.75 1.75 0 0 0 3 6v1"/>
+      <path d="M14 4.25h1.25A1.75 1.75 0 0 1 17 6v1"/>
+      <path d="M17 13v1a1.75 1.75 0 0 1-1.75 1.75H14"/>
+      <path d="M6 15.75H4.75A1.75 1.75 0 0 1 3 14v-1"/>
+      <path d="M6.5 8.25h7"/>
+      <path d="M5.75 10h8.5"/>
+      <path d="M6.5 11.75h7"/>
+    </svg>`,
+    captureCard: `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+      <path d="M6 3.75H4.75A1.75 1.75 0 0 0 3 5.5v1.25"/>
+      <path d="M14 3.75h1.25A1.75 1.75 0 0 1 17 5.5v1.25"/>
+      <path d="M17 14.5v1.25a1.75 1.75 0 0 1-1.75 1.75H14"/>
+      <path d="M6 17.5H4.75A1.75 1.75 0 0 1 3 15.75V14.5"/>
+      <rect x="5.5" y="6" width="9" height="8" rx="1.75"/>
+      <path d="M7.5 8.5h5"/>
+      <path d="M7.5 10.75h3.25"/>
+    </svg>`
+  };
+  const iconClip = clipIconVariants.captureFrame;
 
   // ícone de abas do navegador (browser tabs)
-  const iconCounter = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="2" y="7" width="20" height="14" rx="2"/>
-    <path d="M2 11h20"/>
-    <path d="M6 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+  const iconCounter = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="2.75" y="4" width="14.5" height="10.5" rx="1.75"/>
+    <path d="M2.75 7h14.5"/>
+    <path d="M7 16.25h6"/>
   </svg>`;
 
-  const iconOrders = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M6 6h15"/>
-    <path d="M6 12h15"/>
-    <path d="M6 18h15"/>
-    <path d="M3 6h.01"/>
-    <path d="M3 12h.01"/>
-    <path d="M3 18h.01"/>
+  const iconOrders = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M5.25 5.75h.01"/>
+    <path d="M8 5.75h6.75"/>
+    <path d="M5.25 10h.01"/>
+    <path d="M8 10h6.75"/>
+    <path d="M5.25 14.25h.01"/>
+    <path d="M8 14.25h6.75"/>
   </svg>`;
 
-  const iconAccount = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
-    <circle cx="12" cy="7" r="4"/>
+  const iconHistory = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M4 5.75V3.5"/>
+    <path d="M4 3.5h2.25"/>
+    <path d="M4.8 6.2A6.75 6.75 0 1 1 3.25 10"/>
+    <path d="M10 6.25V10l2.25 1.5"/>
   </svg>`;
 
-  const iconGestor = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-    <path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/>
-    <path d="m3.3 7 8.7 5 8.7-5"/>
-    <path d="M12 22V12"/>
+  const iconAccount = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="2.75" y="3.25" width="14.5" height="13.5" rx="1.75"/>
+    <circle cx="10" cy="8.25" r="2.25"/>
+    <path d="M6.75 13.75c.8-1.45 1.98-2.25 3.25-2.25s2.45.8 3.25 2.25"/>
+  </svg>`;
+
+  const iconGestor = `<svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect x="3" y="3.25" width="14" height="13.5" rx="1.75"/>
+    <path d="M6 6.75h.01"/>
+    <path d="M8.75 6.75H14"/>
+    <path d="M6 10h.01"/>
+    <path d="M8.75 10H14"/>
+    <path d="M6 13.25h.01"/>
+    <path d="M8.75 13.25h3.75"/>
   </svg>`;
 
   bar.innerHTML = `
@@ -1114,12 +1228,17 @@ function createTopBar() {
     <div class="sp-sep"></div>
     <button id="sp-btn-clip"    class="sp-btn" title="Capturar Dados (Alt+C)">${iconClip}</button>
     <div class="sp-sep"></div>
-    <button id="sp-btn-counter" class="sp-btn" title="Abas ML abertas — clique para recarregar (Alt+R)">
+    <button id="sp-btn-counter" class="sp-btn" title="Abas ML abertas - clique para recarregar (Alt+R)">
       ${iconCounter}
       <span class="sp-counter-badge" id="sp-counter-badge"></span>
     </button>
     <div class="sp-sep"></div>
     <button id="sp-btn-orders" class="sp-btn" title="Pegador de Pedidos (Alt+P)">${iconOrders}</button>
+    <div class="sp-sep"></div>
+    <button id="sp-btn-history" class="sp-btn" title="Pedidos anteriores do cliente">
+      ${iconHistory}
+      <span class="sp-history-badge" id="sp-history-badge"></span>
+    </button>
     <div class="sp-sep"></div>
     <button id="sp-btn-gestor" class="sp-btn" title="Gestor de Pendências (Alt+G)">
       ${iconGestor}
@@ -1137,6 +1256,7 @@ function createTopBar() {
   const btnClip    = bar.querySelector('#sp-btn-clip');
   const btnCounter = bar.querySelector('#sp-btn-counter');
   const btnOrders  = bar.querySelector('#sp-btn-orders');
+  const btnHistory = bar.querySelector('#sp-btn-history');
   const btnGestor  = bar.querySelector('#sp-btn-gestor');
   const btnAuth    = bar.querySelector('#sp-btn-auth');
 
@@ -1194,6 +1314,13 @@ function createTopBar() {
     toggleOrderPickerPanel();
   });
 
+  btnHistory?.addEventListener('click', () => {
+    toggleCustomerHistoryOverlay().catch((error) => {
+      console.error('[Sentinela Pro] Erro ao abrir recompra:', error);
+      mostrarNotificacao('Não foi possível abrir a recompra.', 'error');
+    });
+  });
+
   btnGestor?.addEventListener('click', () => {
     toggleGestorPanel();
   });
@@ -1218,6 +1345,9 @@ function createTopBar() {
     } else if ((e.key === 'p' || e.key === 'P') && btnOrders) {
       e.preventDefault();
       btnOrders.click();
+    } else if ((e.key === 'h' || e.key === 'H') && btnHistory) {
+      e.preventDefault();
+      btnHistory.click();
     } else if ((e.key === 'g' || e.key === 'G') && btnGestor) {
       e.preventDefault();
       btnGestor.click();
@@ -1233,6 +1363,7 @@ function createTopBar() {
   });
   syncGestorButton();
   syncAuthButton();
+  syncCustomerHistoryButton();
   upgradeTopBarLayout(bar);
 }
 
@@ -1307,12 +1438,13 @@ function renderTopBarLayout(bar, order = HUB_DEFAULT_BUTTON_ORDER) {
     clip: { id: 'sp-btn-clip', label: 'Gravação' },
     counter: { id: 'sp-btn-counter', label: 'N. de Página' },
     orders: { id: 'sp-btn-orders', label: 'Pedidos' },
+    history: { id: 'sp-btn-history', label: 'Recompra' },
     gestor: { id: 'sp-btn-gestor', label: 'Pendências' },
     auth: { id: 'sp-btn-auth', label: 'Conta' },
   };
 
   defs.counter.label = 'N.º Páginas';
-  const normalizedOrder = normalizeTopBarOrder(order);
+  const normalizedOrder = normalizeTopBarOrder(order).filter((key) => key !== 'auth');
   const buttons = {};
   Object.values(defs).forEach((def) => {
     const button = document.getElementById(def.id);
@@ -1345,14 +1477,8 @@ function renderTopBarLayout(bar, order = HUB_DEFAULT_BUTTON_ORDER) {
   if (authButton) {
     const side = document.createElement('div');
     side.className = 'sp-topbar-side';
-    const item = document.createElement('div');
-    item.className = 'sp-topbar-item';
-    item.appendChild(authButton);
-    const label = document.createElement('span');
-    label.className = 'sp-btn-label';
-    label.textContent = defs.auth.label;
-    item.appendChild(label);
-    side.appendChild(item);
+    authButton.classList.add('sp-btn-auth-icon');
+    side.appendChild(authButton);
     bar.appendChild(side);
   }
 }
@@ -1407,24 +1533,20 @@ function setAuthPanelStatus(message = '', tone = 'info') {
 }
 
 function renderAuthPanelContent(panel) {
-  const themeLabel = isDarkTheme ? 'Escuro' : 'Claro';
   const themeAction = isDarkTheme ? 'Usar tema claro' : 'Usar tema escuro';
   const displayName = getAuthUserDisplayName();
-  const themeMarkup = `
-      <div class="sp-auth-theme">
-        <div class="sp-auth-theme__copy">
-          <span class="sp-auth-theme__eyebrow">Tema da interface</span>
-          <strong>${themeLabel}</strong>
-          <p>Aplica em Passo Largo, Gestor, Pegador de Pedidos e Clip.</p>
-        </div>
-        <button type="button" id="sp-auth-theme-toggle" class="sp-auth-theme-toggle">${themeAction}</button>
-      </div>
-  `;
+  const editIcon = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 1 1 3 3L7 19l-4 1 1-4Z"/></svg>`;
+  const themeIcon = isDarkTheme
+    ? `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2.2"/><path d="M12 19.8V22"/><path d="m4.93 4.93 1.56 1.56"/><path d="m17.51 17.51 1.56 1.56"/><path d="M2 12h2.2"/><path d="M19.8 12H22"/><path d="m4.93 19.07 1.56-1.56"/><path d="m17.51 6.49 1.56-1.56"/></svg>`
+    : `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.8A9 9 0 1 1 11.2 3 7 7 0 0 0 21 12.8Z"/></svg>`;
   panel.innerHTML = hasAuthSession()
     ? `
       <div class="sp-auth-panel__header">
         <strong>Conta do Hub</strong>
-        <button type="button" id="sp-auth-close" class="sp-auth-close" aria-label="Fechar">x</button>
+        <div class="sp-auth-panel__actions">
+          <button type="button" id="sp-auth-theme-toggle" class="sp-auth-icon-btn sp-auth-icon-btn--header" aria-label="${themeAction}" title="${themeAction}">${themeIcon}</button>
+          <button type="button" id="sp-auth-close" class="sp-auth-close" aria-label="Fechar">x</button>
+        </div>
       </div>
       <p class="sp-auth-copy">Conectado com a conta que será usada pelo Gestor e pelo Passo Largo.</p>
       <div class="sp-auth-summary">
@@ -1434,19 +1556,26 @@ function renderAuthPanelContent(panel) {
           <p>${escapeHtml(auth.user?.email || 'Sessão ativa neste navegador.')}</p>
         </div>
       </div>
-      <label class="sp-auth-field">
-        <span>Nome de exibição</span>
-        <input id="sp-auth-display-name" type="text" maxlength="80" placeholder="Ex.: Bruno / Expedição" value="${escapeHtml(displayName)}" />
-      </label>
-      <button type="button" id="sp-auth-save-display-name" class="sp-auth-run sp-auth-run--secondary">Salvar nome</button>
-      ${themeMarkup}
+      <div class="sp-auth-display-name${authDisplayNameEditing ? ' is-editing' : ''}">
+        <label class="sp-auth-field">
+          <span>Nome de exibição</span>
+          <div class="sp-auth-inline">
+            <input id="sp-auth-display-name" type="text" maxlength="80" placeholder="Ex.: Bruno / Expedição" value="${escapeHtml(displayName)}" ${authDisplayNameEditing ? '' : 'readonly'} />
+            <button type="button" id="sp-auth-edit-display-name" class="sp-auth-icon-btn" aria-label="${authDisplayNameEditing ? 'Cancelar edição do nome' : 'Editar nome de exibição'}" title="${authDisplayNameEditing ? 'Cancelar edição' : 'Editar nome'}">${editIcon}</button>
+          </div>
+        </label>
+        ${authDisplayNameEditing ? '<button type="button" id="sp-auth-save-display-name" class="sp-auth-run sp-auth-run--secondary">Salvar nome</button>' : ''}
+      </div>
       <button type="button" id="sp-auth-logout" class="sp-auth-run sp-auth-run--danger">Sair</button>
       <p id="sp-auth-status" class="sp-auth-status" data-tone="info"></p>
     `
     : `
       <div class="sp-auth-panel__header">
         <strong>Conta do Hub</strong>
-        <button type="button" id="sp-auth-close" class="sp-auth-close" aria-label="Fechar">x</button>
+        <div class="sp-auth-panel__actions">
+          <button type="button" id="sp-auth-theme-toggle" class="sp-auth-icon-btn sp-auth-icon-btn--header" aria-label="${themeAction}" title="${themeAction}">${themeIcon}</button>
+          <button type="button" id="sp-auth-close" class="sp-auth-close" aria-label="Fechar">x</button>
+        </div>
       </div>
       <p class="sp-auth-copy">Entre com a mesma conta do Gestor de Pendências. O Passo Largo vai usar essa conta depois.</p>
       <label class="sp-auth-field">
@@ -1457,7 +1586,6 @@ function renderAuthPanelContent(panel) {
         <span>Senha</span>
         <input id="sp-auth-password" type="password" autocomplete="current-password" placeholder="Sua senha" />
       </label>
-      ${themeMarkup}
       <button type="button" id="sp-auth-login" class="sp-auth-run">Entrar</button>
       <p id="sp-auth-status" class="sp-auth-status" data-tone="info"></p>
     `;
@@ -1471,11 +1599,24 @@ function bindAuthPanelEvents(panel) {
 
   if (hasAuthSession()) {
     panel.querySelector('#sp-auth-logout')?.addEventListener('click', onAuthLogout);
+    panel.querySelector('#sp-auth-edit-display-name')?.addEventListener('click', () => {
+      authDisplayNameEditing = !authDisplayNameEditing;
+      renderAuthPanelContent(panel);
+      if (authDisplayNameEditing) {
+        const input = panel.querySelector('#sp-auth-display-name');
+        input?.focus();
+        input?.select();
+      }
+    });
     panel.querySelector('#sp-auth-save-display-name')?.addEventListener('click', onAuthSaveDisplayName);
     panel.querySelector('#sp-auth-display-name')?.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
         onAuthSaveDisplayName();
+      } else if (event.key === 'Escape' && authDisplayNameEditing) {
+        event.preventDefault();
+        authDisplayNameEditing = false;
+        renderAuthPanelContent(panel);
       }
     });
     return;
@@ -1504,6 +1645,8 @@ function createAuthPanel() {
   panel.id = 'sp-auth-panel';
   applyHubTheme(panel);
   renderAuthPanelContent(panel);
+  panel.addEventListener('click', (event) => event.stopPropagation());
+  panel.addEventListener('mousedown', (event) => event.stopPropagation());
   document.body.appendChild(panel);
   return panel;
 }
@@ -1521,6 +1664,7 @@ function openAuthPanel() {
 }
 
 function closeAuthPanel() {
+  authDisplayNameEditing = false;
   document.getElementById('sp-auth-panel')?.classList.remove('visible');
   document.getElementById('sp-btn-auth')?.classList.toggle('sp-active', hasAuthSession());
 }
@@ -1573,6 +1717,7 @@ async function onAuthLogin() {
 
 async function onAuthSaveDisplayName() {
   const panel = createAuthPanel();
+  if (!authDisplayNameEditing) return;
   const input = panel.querySelector('#sp-auth-display-name');
   const button = panel.querySelector('#sp-auth-save-display-name');
   const displayName = input?.value?.trim() || '';
@@ -1582,10 +1727,11 @@ async function onAuthSaveDisplayName() {
 
   try {
     await saveCurrentHubUserProfile(displayName);
+    authDisplayNameEditing = false;
     syncAuthButton();
     renderAuthPanelContent(panel);
     if (panel.classList.contains('visible')) {
-      panel.querySelector('#sp-auth-display-name')?.focus();
+      panel.querySelector('#sp-auth-edit-display-name')?.focus();
     }
     if (document.getElementById('sp-order-panel')) {
       renderOrderPickerSessionState(document.getElementById('sp-order-panel'));
@@ -1607,6 +1753,7 @@ async function onAuthLogout() {
   setAuthPanelStatus('Saindo...', 'info');
 
   try {
+    authDisplayNameEditing = false;
     await signOut();
     chrome.runtime.sendMessage({ type: 'REVOKE_GMAIL_TOKEN' });
     await clearSession();
@@ -1849,7 +1996,7 @@ function renderGestorCards(tab = gestorCurrentTab) {
       <div class="sp-gestor-card__summary" data-action="toggle-card" data-id="${escapeGestorValue(p.id)}">
         <div class="sp-gestor-card__top">
           <div class="sp-gestor-card__identity">
-            <strong>${escapeGestorValue(p.login_cliente || 'Pendencia')}</strong>
+            <strong>${escapeGestorValue(p.login_cliente || 'Pendência')}</strong>
             <span>${escapeGestorValue(formatGestorDate(p.created_at) || 'Sem data')}</span>
           </div>
           <div class="sp-gestor-card__top-side">
@@ -2000,7 +2147,7 @@ function renderGestorPanelContent(panel) {
           <button type="button" id="sp-gestor-save-email" class="sp-gestor-action sp-gestor-action--primary">Salvar email</button>
           <div class="sp-gestor-settings__block">
             <strong>Fefrello</strong>
-            <p>Configure board, coluna e responsavel para criar cards direto do Gestor.</p>
+            <p>Configure board, coluna e responsável para criar cards direto do Gestor.</p>
           </div>
           <label class="sp-gestor-field">
             <span>Board</span>
@@ -2015,9 +2162,9 @@ function renderGestorPanelContent(panel) {
             </select>
           </label>
           <label class="sp-gestor-field">
-            <span>Responsavel</span>
+            <span>Responsável</span>
             <select id="sp-gestor-fefrello-responsible" class="sp-gestor-select">
-              <option value="">Sem responsavel</option>
+              <option value="">Sem responsável</option>
               ${GESTOR_FEFRELLO_RESPONSAVEIS.map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`).join('')}
             </select>
           </label>
@@ -2242,6 +2389,7 @@ function makeGestorPanelDraggable(panel) {
 
 async function openGestorPanel() {
   await loadGestorPanelPosition();
+  primeGestorCapturedSession();
   const panel = createGestorPanel();
   applyHubTheme(panel);
   positionGestorPanel(panel);
@@ -2335,7 +2483,7 @@ async function submitGestorCreate({ sendToFefrello = false } = {}) {
 
   try {
     if (sendToFefrello) {
-      const title = fields.login_cliente || fields.numero_venda || 'Sem titulo';
+      const title = fields.login_cliente || fields.numero_venda || 'Sem título';
       const description = formatGestorCardForFefrello(fields);
       await createGestorFefrelloCard(
         fefrelloConfig.boardId,
@@ -2528,7 +2676,7 @@ async function onGestorSaveCard(event) {
     }
     gestorExpandedCardId = null;
     renderGestorPanelContent(createGestorPanel());
-    setGestorStatus('Pendencia atualizada.', 'success');
+    setGestorStatus('Pendência atualizada.', 'success');
   } catch (error) {
     setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
     button.disabled = false;
@@ -2705,7 +2853,7 @@ async function onGestorDelete(event) {
     if (gestorExpandedCardId === String(id)) gestorExpandedCardId = null;
     await saveGestorCardStatus();
     await loadGestorPendencias();
-    setGestorStatus('Pendencia excluida.', 'success');
+    setGestorStatus('Pendência excluída.', 'success');
   } catch (error) {
     setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
   }
@@ -2819,7 +2967,7 @@ async function onGestorCreateFefrelloAction(event) {
   }
 
   try {
-    const title = pendencia.login_cliente || pendencia.numero_venda || 'Sem titulo';
+    const title = pendencia.login_cliente || pendencia.numero_venda || 'Sem título';
     const description = formatGestorCardForFefrello(pendencia);
     await createGestorFefrelloCard(config.boardId, config.columnId, title, description, config.responsible || '');
     gestorFefrelloSentIds.add(String(id));
@@ -2838,7 +2986,7 @@ async function onGestorCreateFefrelloAction(event) {
 async function onGestorSendConsolidatedAction() {
   const selected = getSelectedGestorBatchItems();
   if (!selected.length) {
-    setGestorStatus('Nenhuma pendencia selecionada.', 'error');
+    setGestorStatus('Nenhuma pendência selecionada.', 'error');
     return;
   }
 
@@ -2856,7 +3004,7 @@ async function onGestorSendConsolidatedAction() {
     await saveGestorCardStatus();
     closeGestorBatchModal();
     renderGestorPanelContent(createGestorPanel());
-    setGestorStatus(`Consolidado enviado - ${selected.length} pendência(s)!`, 'success');
+    setGestorStatus(`Consolidado enviado — ${selected.length} pendência(s)!`, 'success');
   } catch (error) {
     setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
   } finally {
@@ -2945,7 +3093,7 @@ async function onGestorClearArchivedAction() {
     button.textContent = 'Limpando...';
   }
 
-  setGestorStatus('Limpando historico...', 'info');
+  setGestorStatus('Limpando histórico...', 'info');
   try {
     for (const pendencia of historico) {
       await deleteGestorPendencia(pendencia.id);
@@ -3441,6 +3589,146 @@ function getOrderPickerHistoryGroups(entries) {
   return buckets.filter((bucket) => bucket.entries.length > 0);
 }
 
+function getOrderPickerDayKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function getOrderPickerSequenceUserKey() {
+  return String(auth.user?.id || '').trim();
+}
+
+async function loadOrderPickerDaySequenceState() {
+  try {
+    const stored = await chrome.storage.local.get([ORDER_PICKER_DAY_SEQUENCE_KEY]);
+    return stored?.[ORDER_PICKER_DAY_SEQUENCE_KEY] && typeof stored[ORDER_PICKER_DAY_SEQUENCE_KEY] === 'object'
+      ? stored[ORDER_PICKER_DAY_SEQUENCE_KEY]
+      : {};
+  } catch (_) {
+    return {};
+  }
+}
+
+async function saveOrderPickerDaySequenceState(state) {
+  await chrome.storage.local.set({ [ORDER_PICKER_DAY_SEQUENCE_KEY]: state });
+}
+
+function normalizeOrderPickerSequenceEntry(entry) {
+  const numeroVenda = normalizeOrderPickerSaleNumber(entry?.numeroVenda || entry?.saleNumber);
+  if (!numeroVenda) return null;
+  return {
+    numeroVenda,
+    url: String(entry?.url || getOrderDetailUrl(numeroVenda)).trim(),
+    loginCliente: normalizeOrderPickerLogin(entry?.loginCliente || entry?.login || ''),
+    openedAt: String(entry?.openedAt || new Date().toISOString())
+  };
+}
+
+function getTodayOrderPickerSequenceFromHistoryCache() {
+  const now = new Date();
+  const ownEntries = getOwnOrderPickerHistoryEntries()
+    .filter((entry) => {
+      const selectedAt = new Date(entry.selectedAt);
+      return !Number.isNaN(selectedAt.getTime()) && isSameOrderPickerDay(selectedAt, now);
+    })
+    .slice()
+    .sort((a, b) => Date.parse(a.selectedAt) - Date.parse(b.selectedAt));
+
+  const seen = new Set();
+  return ownEntries
+    .map((entry) => normalizeOrderPickerSequenceEntry({
+      numeroVenda: entry.numeroVenda,
+      url: entry.url,
+      loginCliente: entry.loginCliente,
+      openedAt: entry.selectedAt
+    }))
+    .filter((entry) => {
+      if (!entry || seen.has(entry.numeroVenda)) return false;
+      seen.add(entry.numeroVenda);
+      return true;
+    });
+}
+
+async function loadTodayOrderPickerSequence() {
+  if (!hasAuthSession()) {
+    orderPickerTodaySequence = [];
+    return orderPickerTodaySequence;
+  }
+
+  const userKey = getOrderPickerSequenceUserKey();
+  const dayKey = getOrderPickerDayKey();
+  const state = await loadOrderPickerDaySequenceState();
+  const scoped = state?.[userKey];
+  const items = scoped?.dayKey === dayKey && Array.isArray(scoped.items)
+    ? scoped.items.map(normalizeOrderPickerSequenceEntry).filter(Boolean)
+    : [];
+
+  orderPickerTodaySequence = items.length ? items : getTodayOrderPickerSequenceFromHistoryCache();
+  return orderPickerTodaySequence;
+}
+
+async function rememberOrderPickerOpenedEntries(entries) {
+  if (!hasAuthSession()) return [];
+
+  const userKey = getOrderPickerSequenceUserKey();
+  const dayKey = getOrderPickerDayKey();
+  const state = await loadOrderPickerDaySequenceState();
+  const scoped = state?.[userKey]?.dayKey === dayKey && Array.isArray(state?.[userKey]?.items)
+    ? { dayKey, items: state[userKey].items.map(normalizeOrderPickerSequenceEntry).filter(Boolean) }
+    : { dayKey, items: [] };
+
+  const seen = new Set(scoped.items.map((item) => item.numeroVenda));
+  (Array.isArray(entries) ? entries : []).forEach((entry) => {
+    const normalized = normalizeOrderPickerSequenceEntry(entry);
+    if (!normalized || seen.has(normalized.numeroVenda)) return;
+    seen.add(normalized.numeroVenda);
+    scoped.items.push(normalized);
+  });
+
+  state[userKey] = scoped;
+  await saveOrderPickerDaySequenceState(state);
+  orderPickerTodaySequence = scoped.items;
+  return orderPickerTodaySequence;
+}
+
+async function removeOrderPickerSequenceEntriesBySales(sales) {
+  if (!hasAuthSession()) return [];
+
+  const userKey = getOrderPickerSequenceUserKey();
+  const dayKey = getOrderPickerDayKey();
+  const targets = new Set((Array.isArray(sales) ? sales : []).map((sale) => normalizeOrderPickerSaleNumber(sale)).filter(Boolean));
+  if (!targets.size) return orderPickerTodaySequence;
+
+  const state = await loadOrderPickerDaySequenceState();
+  const scoped = state?.[userKey];
+  if (!scoped || scoped.dayKey !== dayKey || !Array.isArray(scoped.items)) return orderPickerTodaySequence;
+
+  scoped.items = scoped.items
+    .map(normalizeOrderPickerSequenceEntry)
+    .filter(Boolean)
+    .filter((entry) => !targets.has(entry.numeroVenda));
+  state[userKey] = scoped;
+  await saveOrderPickerDaySequenceState(state);
+  orderPickerTodaySequence = scoped.items;
+  return orderPickerTodaySequence;
+}
+
+async function clearTodayOrderPickerSequence() {
+  if (!hasAuthSession()) {
+    orderPickerTodaySequence = [];
+    return [];
+  }
+
+  const userKey = getOrderPickerSequenceUserKey();
+  const state = await loadOrderPickerDaySequenceState();
+  delete state[userKey];
+  await saveOrderPickerDaySequenceState(state);
+  orderPickerTodaySequence = [];
+  return orderPickerTodaySequence;
+}
+
 function setOrderPickerView(view, panel = document.getElementById('sp-order-panel') || createOrderPickerPanel()) {
   const nextView = view === 'history' ? 'history' : 'picker';
   orderPickerCurrentView = nextView;
@@ -3461,33 +3749,12 @@ function setOrderPickerView(view, panel = document.getElementById('sp-order-pane
 }
 
 function renderOrderPickerSessionState(panel) {
-  const sessionBox = panel?.querySelector('#sp-order-session');
   const quantityInput = panel?.querySelector('#sp-order-quantity');
   const runButton = panel?.querySelector('#sp-order-run');
   const searchInputs = panel ? Array.from(panel.querySelectorAll('.sp-order-search-grid input')) : [];
   const refreshButton = panel?.querySelector('#sp-order-refresh');
   const clearButton = panel?.querySelector('#sp-order-clear');
   const ownEntryCount = getOwnOrderPickerHistoryEntries().length;
-  if (!sessionBox) return;
-
-  if (hasAuthSession()) {
-    sessionBox.innerHTML = `
-      <div class="sp-order-session__copy">
-        <span>Conta do Hub</span>
-        <strong>${escapeHtml(getAuthUserDisplayName())}</strong>
-        <small>${escapeHtml(auth.user?.email || '')}</small>
-      </div>
-    `;
-  } else {
-    sessionBox.innerHTML = `
-      <div class="sp-order-session__copy">
-        <span>Conta do Hub</span>
-        <strong>Login necessário</strong>
-      </div>
-      <button type="button" id="sp-order-open-auth" class="sp-order-link">Abrir login</button>
-    `;
-    sessionBox.querySelector('#sp-order-open-auth')?.addEventListener('click', () => openAuthPanel());
-  }
 
   const disabled = !hasAuthSession();
   if (quantityInput) quantityInput.disabled = disabled;
@@ -3545,6 +3812,7 @@ function renderOrderPickerDashboard(panel = document.getElementById('sp-order-pa
   const searchSaleInput = panel.querySelector('#sp-order-search-sale');
   const searchResult = panel.querySelector('#sp-order-search-result');
   const historyList = panel.querySelector('#sp-order-history-list');
+  const reopenTodayButton = panel.querySelector('#sp-order-reopen-today');
   const clearButton = panel.querySelector('#sp-order-clear');
 
   if (!metrics || !searchResult || !historyList) return;
@@ -3570,6 +3838,12 @@ function renderOrderPickerDashboard(panel = document.getElementById('sp-order-pa
   }
   if (clearButton) {
     clearButton.disabled = !hasAuthSession() || ownEntries.length === 0;
+  }
+  if (reopenTodayButton) {
+    reopenTodayButton.disabled = !hasAuthSession() || orderPickerTodaySequence.length === 0;
+    reopenTodayButton.title = orderPickerTodaySequence.length
+      ? `Reabrir ${orderPickerTodaySequence.length} pedido(s) do dia na ordem original`
+      : 'Nenhum pedido do dia registrado para reabrir';
   }
 
   if (!hasAuthSession()) {
@@ -3625,6 +3899,7 @@ async function refreshOrderPickerDashboard(panel = document.getElementById('sp-o
 
   if (hasAuthSession()) {
     try {
+      await loadTodayOrderPickerSequence();
       await loadOrderPickerHistory(force);
       if (hasFilter) {
         if (searchResult) {
@@ -3657,6 +3932,7 @@ async function refreshOrderPickerDashboard(panel = document.getElementById('sp-o
     orderPickerSearchResults = [];
     orderPickerSearchQueryKey = '';
     orderPickerSearchLoading = false;
+    orderPickerTodaySequence = [];
   }
 
   renderOrderPickerDashboard(panel);
@@ -3686,7 +3962,6 @@ function createOrderPickerPanel() {
       <strong>Pegador de Pedidos</strong>
       <button type="button" id="sp-order-close" class="sp-order-close" aria-label="Fechar">x</button>
     </div>
-    <div id="sp-order-session" class="sp-order-session"></div>
     <div class="sp-order-tabs" role="tablist" aria-label="Modos do pegador de pedidos">
       <button type="button" class="sp-order-tab is-active" data-view="picker" aria-selected="true">Coleta</button>
       <button type="button" class="sp-order-tab" data-view="history" aria-selected="false">Painel</button>
@@ -3715,6 +3990,7 @@ function createOrderPickerPanel() {
       <div class="sp-order-history-head">
         <strong id="sp-order-history-title">Histórico de pedidos</strong>
         <div class="sp-order-history-actions">
+          <button type="button" id="sp-order-reopen-today" class="sp-order-link">Reabrir pedidos do dia</button>
           <button type="button" id="sp-order-refresh" class="sp-order-link">Atualizar</button>
           <button type="button" id="sp-order-clear" class="sp-order-link sp-order-link--danger">Limpar tudo</button>
         </div>
@@ -3728,6 +4004,7 @@ function createOrderPickerPanel() {
   const quantityInput = panel.querySelector('#sp-order-quantity');
   const runButton = panel.querySelector('#sp-order-run');
   const closeButton = panel.querySelector('#sp-order-close');
+  const reopenTodayButton = panel.querySelector('#sp-order-reopen-today');
   const refreshButton = panel.querySelector('#sp-order-refresh');
   const clearButton = panel.querySelector('#sp-order-clear');
   const historyList = panel.querySelector('#sp-order-history-list');
@@ -3768,6 +4045,42 @@ function createOrderPickerPanel() {
   refreshButton.addEventListener('click', () => {
     void refreshOrderPickerDashboard(panel, true);
   });
+  reopenTodayButton.addEventListener('click', async () => {
+    await loadTodayOrderPickerSequence();
+    if (!orderPickerTodaySequence.length) {
+      await loadOrderPickerHistory(true);
+      orderPickerTodaySequence = getTodayOrderPickerSequenceFromHistoryCache();
+    }
+
+    if (!orderPickerTodaySequence.length) {
+      setOrderPickerStatus('Nenhum pedido do dia foi registrado para reabrir.', 'error');
+      return;
+    }
+
+    reopenTodayButton.disabled = true;
+    setOrderPickerStatus(`Reabrindo ${orderPickerTodaySequence.length} pedido(s) do dia...`, 'info');
+
+    try {
+      const openResult = await chrome.runtime.sendMessage({
+        type: 'OPEN_ORDER_TABS',
+        urls: orderPickerTodaySequence.map((entry) => entry.url)
+      });
+
+      if (!openResult?.ok) {
+        throw new Error(openResult?.error || 'Falha ao reabrir os pedidos do dia.');
+      }
+
+      setOrderPickerStatus(`${openResult.opened || 0} pedido(s) do dia reaberto(s).`, 'success');
+      mostrarNotificacao(`${openResult.opened || 0} pedido(s) do dia reaberto(s)!`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setOrderPickerStatus(message, 'error');
+      mostrarNotificacao(message, 'error');
+    } finally {
+      reopenTodayButton.disabled = false;
+      renderOrderPickerDashboard(panel);
+    }
+  });
   clearButton.addEventListener('click', async () => {
     if (!hasAuthSession()) {
       setOrderPickerStatus('Faça login no Hub para limpar o histórico.', 'error');
@@ -3778,6 +4091,7 @@ function createOrderPickerPanel() {
 
     try {
       await clearOrderPickerHistory();
+      await clearTodayOrderPickerSequence();
       renderOrderPickerDashboard(panel);
       setOrderPickerStatus('Histórico removido com sucesso.', 'success');
       mostrarNotificacao('Histórico do painel removido.');
@@ -3795,7 +4109,9 @@ function createOrderPickerPanel() {
     if (!recordId || !window.confirm('Excluir este registro do histórico?')) return;
 
     try {
+      const entry = orderPickerHistoryCache.find((item) => String(item.id) === recordId);
       await deleteOrderPickerHistoryEntry(recordId);
+      await removeOrderPickerSequenceEntriesBySales([entry?.numeroVenda]);
       renderOrderPickerDashboard(panel);
       setOrderPickerStatus('Registro removido do histórico.', 'success');
     } catch (error) {
@@ -3819,7 +4135,7 @@ function openOrderPickerPanel() {
   void refreshOrderPickerDashboard(panel);
 
   if (!isOrderPickerSupportedPage()) {
-    setOrderPickerStatus('Abra a tela de Vendas do Mercado Livre para usar este modulo.', 'error');
+    setOrderPickerStatus('Abra a tela de Vendas do Mercado Livre para usar este módulo.', 'error');
   } else if (!hasAuthSession()) {
     setOrderPickerStatus('Faça login no Hub para registrar os pedidos no painel.', 'error');
   } else {
@@ -3862,7 +4178,7 @@ async function runOrderPicker() {
   }
 
   if (!isOrderPickerSupportedPage()) {
-    setOrderPickerStatus('Abra a tela de Vendas do Mercado Livre para usar este modulo.', 'error');
+    setOrderPickerStatus('Abra a tela de Vendas do Mercado Livre para usar este módulo.', 'error');
     return;
   }
 
@@ -3880,10 +4196,10 @@ async function runOrderPicker() {
 
     const result = collectOrdersFromBottom(requestedQuantity);
     if (result.totalRows === 0) {
-      throw new Error('Nenhuma linha de pedido foi encontrada nesta pagina.');
+      throw new Error('Nenhuma linha de pedido foi encontrada nesta página.');
     }
     if (result.selectedOrders.length === 0) {
-      throw new Error('Nenhum pedido visivel pode ser selecionado no momento.');
+      throw new Error('Nenhum pedido visível pode ser selecionado no momento.');
     }
 
     const openResult = await chrome.runtime.sendMessage({
@@ -3896,6 +4212,7 @@ async function runOrderPicker() {
     }
 
     await saveOrderPickerHistoryEntries(result.selectedOrders);
+    await rememberOrderPickerOpenedEntries(result.selectedOrders);
     renderOrderPickerDashboard(panel);
 
     const processedOrders = result.selectedOrders.map((order) => order.numeroVenda).join(', ');
@@ -3918,10 +4235,852 @@ async function runOrderPicker() {
   }
 }
 
+function createEmptyCustomerHistoryState() {
+  return {
+    login: '',
+    saleNumber: '',
+    requestId: '',
+    requestKey: '',
+    sourceUrl: '',
+    status: 'idle',
+    error: '',
+    results: [],
+    previousOrders: [],
+    notifiedRequestKey: '',
+    updatedAt: 0
+  };
+}
+
+function normalizeCustomerHistoryEntry(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+
+  const saleNumber = normalizeOrderPickerSaleNumber(entry.saleNumber || entry.id || entry.numeroVenda);
+  if (!saleNumber) return null;
+
+  return {
+    saleNumber,
+    login: normalizeOrderPickerLogin(entry.login || entry.nickName || entry.loginCliente),
+    date: String(entry.date || '').trim(),
+    model: String(entry.model || entry.label || '').trim(),
+    sizesText: String(entry.sizesText || '').trim(),
+    messageUrl: String(entry.messageUrl || entry.messengerUrl || '').trim(),
+    detailUrl: String(entry.detailUrl || entry.orderUrl || '').trim(),
+    sortIndex: Number(entry.sortIndex) || 0
+  };
+}
+
+function normalizeCustomerHistoryState(state) {
+  const normalized = state && typeof state === 'object' ? state : {};
+  return {
+    login: normalizeOrderPickerLogin(normalized.login),
+    saleNumber: normalizeOrderPickerSaleNumber(normalized.saleNumber),
+    requestId: String(normalized.requestId || '').trim(),
+    requestKey: String(normalized.requestKey || '').trim(),
+    sourceUrl: String(normalized.sourceUrl || '').trim(),
+    status: ['idle', 'loading', 'loaded', 'error'].includes(normalized.status) ? normalized.status : 'idle',
+    error: String(normalized.error || '').trim(),
+    results: Array.isArray(normalized.results) ? normalized.results.map(normalizeCustomerHistoryEntry).filter(Boolean) : [],
+    previousOrders: Array.isArray(normalized.previousOrders) ? normalized.previousOrders.map(normalizeCustomerHistoryEntry).filter(Boolean) : [],
+    notifiedRequestKey: String(normalized.notifiedRequestKey || '').trim(),
+    updatedAt: Number(normalized.updatedAt) || 0
+  };
+}
+
+function loadCustomerHistoryState() {
+  try {
+    const raw = sessionStorage.getItem(CUSTOMER_HISTORY_SESSION_KEY);
+    return normalizeCustomerHistoryState(raw ? JSON.parse(raw) : null);
+  } catch (error) {
+    console.error('[Sentinela Pro] Erro ao carregar o estado de recompra:', error);
+    return createEmptyCustomerHistoryState();
+  }
+}
+
+function saveCustomerHistoryState(nextState) {
+  const normalized = normalizeCustomerHistoryState({
+    ...loadCustomerHistoryState(),
+    ...nextState
+  });
+
+  try {
+    sessionStorage.setItem(CUSTOMER_HISTORY_SESSION_KEY, JSON.stringify(normalized));
+  } catch (error) {
+    console.error('[Sentinela Pro] Erro ao salvar o estado de recompra:', error);
+  }
+
+  return normalized;
+}
+
+function getCustomerHistorySourceUrlKey(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+
+  try {
+    const parsed = new URL(raw, window.location.origin);
+    return `${parsed.origin}${parsed.pathname}${parsed.search}`;
+  } catch (_) {
+    return raw.split('#')[0];
+  }
+}
+
+function getCustomerHistoryRequestKey(login, saleNumber) {
+  return `${getOrderPickerSearchKey(login)}::${normalizeOrderPickerSaleNumber(saleNumber)}`;
+}
+
+function isCustomerHistoryMessagePage() {
+  const isMercadoLivre =
+    window.location.hostname.includes('mercadolivre.com.br') ||
+    window.location.hostname.includes('mercadolibre.com');
+
+  return isMercadoLivre && /\/vendas\/novo\/mensagens\/\d+/i.test(window.location.pathname);
+}
+
+function extractCurrentCustomerHistorySaleNumberFromPage() {
+  const detailSale = getCurrentMonitoringOrderId();
+  if (detailSale) return normalizeOrderPickerSaleNumber(detailSale);
+
+  const messageMatch = window.location.pathname.match(/\/vendas\/novo\/mensagens\/(\d+)/i);
+  if (messageMatch?.[1]) return normalizeOrderPickerSaleNumber(messageMatch[1]);
+
+  const selectorCandidates = [
+    '.left-column__pack-id[aria-label^="#"]',
+    '.left-column__pack-id',
+    '.sc-detail-title__text'
+  ];
+
+  for (const selector of selectorCandidates) {
+    const node = document.querySelector(selector);
+    const raw = node?.getAttribute?.('aria-label') || node?.textContent || '';
+    const match = String(raw).match(/(\d{6,})/);
+    if (match?.[1]) return normalizeOrderPickerSaleNumber(match[1]);
+  }
+
+  const htmlMatch = document.body?.innerHTML?.match(/(?:pack-id[^>]*#|Venda\s*#\s*|aria-label="?#)(\d{6,})/i);
+  if (htmlMatch?.[1]) return normalizeOrderPickerSaleNumber(htmlMatch[1]);
+
+  const pageText = document.body?.innerText || '';
+  const textMatch = pageText.match(/Venda\s*#\s*(\d{6,})/i);
+  return normalizeOrderPickerSaleNumber(textMatch?.[1] || '');
+}
+
+function getCurrentCustomerHistorySaleNumber() {
+  return extractCurrentCustomerHistorySaleNumberFromPage();
+}
+
+function normalizeCustomerHistoryDateKey(value) {
+  return String(value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/\bhs\b/g, '')
+    .trim();
+}
+
+function parseCustomerHistoryDateValue(value) {
+  const raw = normalizeCustomerHistoryDateKey(value);
+  if (!raw) return NaN;
+
+  const months = {
+    jan: 0,
+    fev: 1,
+    mar: 2,
+    abr: 3,
+    mai: 4,
+    jun: 5,
+    jul: 6,
+    ago: 7,
+    set: 8,
+    out: 9,
+    nov: 10,
+    dez: 11
+  };
+
+  const match = raw.match(/(\d{1,2})\s+([a-z]{3,})\s*(?:(\d{4}))?\s+(\d{1,2}):(\d{2})/i);
+  if (!match) return NaN;
+
+  const day = Number(match[1]);
+  const month = months[String(match[2] || '').slice(0, 3)];
+  const explicitYear = Number(match[3]);
+  const hour = Number(match[4]);
+  const minute = Number(match[5]);
+
+  if (!Number.isFinite(day) || !Number.isFinite(hour) || !Number.isFinite(minute) || !Number.isFinite(month)) {
+    return NaN;
+  }
+
+  let year = Number.isFinite(explicitYear) && explicitYear > 0 ? explicitYear : new Date().getFullYear();
+  let parsed = new Date(year, month, day, hour, minute, 0, 0);
+
+  if (!Number.isFinite(explicitYear) || explicitYear <= 0) {
+    const now = new Date();
+    if (parsed.getTime() - now.getTime() > 1000 * 60 * 60 * 24 * 30) {
+      year -= 1;
+      parsed = new Date(year, month, day, hour, minute, 0, 0);
+    }
+  }
+
+  return parsed.getTime();
+}
+
+function getCustomerHistorySortDirection(entries) {
+  if (!Array.isArray(entries) || entries.length < 2) return 'desc';
+
+  const comparable = entries
+    .map((entry, index) => ({ index, time: parseCustomerHistoryDateValue(entry?.date) }))
+    .filter((item) => Number.isFinite(item.time));
+
+  if (comparable.length < 2) return 'desc';
+
+  const first = comparable[0];
+  const last = comparable[comparable.length - 1];
+  return first.time <= last.time ? 'asc' : 'desc';
+}
+
+function getCurrentCustomerHistoryPageDate() {
+  const selectors = [
+    '.left-column__order-date',
+    '[data-testid="order-date"]',
+    '.sc-order-date',
+    '.sc-detail-subtitle__text'
+  ];
+
+  for (const selector of selectors) {
+    const raw = document.querySelector(selector)?.getAttribute?.('aria-label')
+      || document.querySelector(selector)?.textContent
+      || '';
+    const normalized = normalizeCustomerHistoryDateKey(raw);
+    if (normalized) return normalized;
+  }
+
+  const pageText = document.body?.innerText || '';
+  const textMatch = pageText.match(/\b\d{1,2}\s+[a-zç]{3,}\s+\d{1,2}:\d{2}\s*hs\b/i);
+  return normalizeCustomerHistoryDateKey(textMatch?.[0] || '');
+}
+
+function getCurrentCustomerHistoryLogin() {
+  const directLogin = normalizeOrderPickerLogin(capturarLoginDoHTML());
+  if (directLogin) return directLogin;
+
+  const pageText = document.body?.innerText || '';
+  return normalizeOrderPickerLogin(getGestorLoginFromPage(pageText));
+}
+
+function getCurrentCustomerHistoryContext() {
+  const storedState = loadCustomerHistoryState();
+  const liveSaleNumber = extractCurrentCustomerHistorySaleNumberFromPage();
+  const sameSourcePage = getCustomerHistorySourceUrlKey(storedState.sourceUrl) === getCustomerHistorySourceUrlKey(window.location.href);
+  const saleNumber = liveSaleNumber || (sameSourcePage ? storedState.saleNumber : '');
+  let login = getCurrentCustomerHistoryLogin();
+
+  if (!login && saleNumber && storedState.saleNumber === saleNumber) {
+    login = storedState.login;
+  } else if (!login && sameSourcePage) {
+    login = storedState.login;
+  }
+
+  if (!login || !saleNumber) return null;
+
+  return {
+    login,
+    saleNumber,
+    sourceUrl: window.location.href
+  };
+}
+
+function decodeCustomerHistoryEscapedString(value) {
+  const normalized = String(value || '')
+    .replace(/\\u002F/g, '/')
+    .replace(/\\u0026/g, '&')
+    .replace(/\\u003D/g, '=')
+    .replace(/\\u003d/g, '=')
+    .replace(/\\u0023/g, '#')
+    .replace(/\\u0025/g, '%')
+    .replace(/\\"/g, '"');
+
+  try {
+    const unescapedUnicode = normalized.replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+    const textarea = document.createElement('textarea');
+    textarea.innerHTML = unescapedUnicode;
+    return textarea.value.trim();
+  } catch (_) {
+    return normalized.trim();
+  }
+}
+
+function normalizeCompactCustomerHistoryModel(label) {
+  let text = decodeCustomerHistoryEscapedString(label);
+  if (!text) return '';
+
+  text = text
+    .replace(/\s+/g, ' ')
+    .replace(/\bAp[oó]s\s+a\s+compra.*$/i, '')
+    .replace(/\bBanhada\b.*$/i, '')
+    .replace(/\bFolheada\b.*$/i, '')
+    .replace(/\bTungst[eê]nio\b/gi, '')
+    .replace(/^Par\s+Alian[cç]a/i, 'Par de Alianças')
+    .replace(/^Par\s+Alian[cç]as/i, 'Par de Alianças')
+    .replace(/\s+,/g, ',')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/[.,;\-–\s]+$/g, '')
+    .trim();
+
+  return text;
+}
+
+function extractCustomerHistorySizes(snippet) {
+  const decoded = decodeCustomerHistoryEscapedString(snippet || '');
+  if (!decoded) return '';
+
+  const masculino = (
+    decoded.match(/(?:aro|tamanho)\s*:*\s*masculino[^0-9]{0,20}(\d{1,2}(?:[.,]\d+)?)/i)
+    || decoded.match(/masculino[^0-9]{0,20}(\d{1,2}(?:[.,]\d+)?)/i)
+  )?.[1] || '';
+  const feminino = (
+    decoded.match(/(?:aro|tamanho)\s*:*\s*feminino[^0-9]{0,20}(\d{1,2}(?:[.,]\d+)?)/i)
+    || decoded.match(/feminino[^0-9]{0,20}(\d{1,2}(?:[.,]\d+)?)/i)
+  )?.[1] || '';
+
+  if (masculino || feminino) {
+    const parts = [];
+    if (masculino) parts.push(`Masc ${masculino.replace('.', ',')}`);
+    if (feminino) parts.push(`Fem ${feminino.replace('.', ',')}`);
+    return parts.join(' • ');
+  }
+
+  const pairMatch = decoded.match(/tamanho[^0-9]{0,20}(\d{1,2}(?:[.,]\d+)?)\s*(?:\/|\||,)\s*(\d{1,2}(?:[.,]\d+)?)/i);
+  if (pairMatch?.[1] && pairMatch?.[2]) {
+    return `Aros ${pairMatch[1].replace('.', ',')} / ${pairMatch[2].replace('.', ',')}`;
+  }
+
+  const aroPairMatch = decoded.match(/aros?[^0-9]{0,20}(\d{1,2}(?:[.,]\d+)?)\s*(?:\/|\||,|-)\s*(\d{1,2}(?:[.,]\d+)?)/i);
+  if (aroPairMatch?.[1] && aroPairMatch?.[2]) {
+    return `Aros ${aroPairMatch[1].replace('.', ',')} / ${aroPairMatch[2].replace('.', ',')}`;
+  }
+
+  const aroSingleMatch = decoded.match(/(?:tamanho|aro)\s*:*\s*aro[^0-9]{0,20}(\d{1,2}(?:[.,]\d+)?)/i);
+  if (aroSingleMatch?.[1]) {
+    return `Aro ${aroSingleMatch[1].replace('.', ',')}`;
+  }
+
+  const pairWordsMatch = decoded.match(/(\d{1,2}(?:[.,]\d+)?)\s*(?:e|\/|\||,|-)\s*(\d{1,2}(?:[.,]\d+)?)/i);
+  if (pairWordsMatch?.[1] && pairWordsMatch?.[2] && /tamanh|aro/i.test(decoded)) {
+    return `Aros ${pairWordsMatch[1].replace('.', ',')} / ${pairWordsMatch[2].replace('.', ',')}`;
+  }
+
+  const genericNumbers = Array.from(decoded.matchAll(/(?:aro|tamanho|tam\.?)[^0-9]{0,12}(\d{1,2}(?:[.,]\d+)?)/gi))
+    .map((match) => (match[1] || '').replace('.', ','))
+    .filter(Boolean);
+  if (genericNumbers.length >= 2) {
+    return `Aros ${genericNumbers.slice(0, 2).join(' / ')}`;
+  }
+  if (genericNumbers.length === 1) {
+    return `Aro ${genericNumbers[0]}`;
+  }
+
+  return '';
+}
+
+function refineCompactCustomerHistoryModel(label) {
+  return String(label || '')
+    .replace(/\bPedra\b/gi, '')
+    .replace(/^Par\s+Alian\S*/i, 'Par de Aliancas')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/[.,;\-\s]+$/g, '')
+    .trim();
+}
+
+function pickCustomerHistoryModel(snippet) {
+  const labels = Array.from(String(snippet || '').matchAll(/"label":"([^"]+)"/g))
+    .map((match) => refineCompactCustomerHistoryModel(normalizeCompactCustomerHistoryModel(match[1])))
+    .filter(Boolean)
+    .filter((label) => !/nao foi possivel exibir/i.test(label))
+    .filter((label) => !/ultimos?\s+\d+\s+mes/i.test(label));
+
+  return labels[0] || '';
+}
+
+function extractCustomerHistoryDetailUrl(snippet, saleNumber) {
+  const sale = normalizeOrderPickerSaleNumber(saleNumber);
+  if (!sale) return '';
+
+  const directPattern = new RegExp(`"url":"(https:\\\\u002F\\\\u002F[^"]*\\\\u002Fvendas\\\\u002F${sale}\\\\u002Fdetalhe[^"]*)"`, 'i');
+  const directMatch = String(snippet || '').match(directPattern);
+  if (directMatch?.[1]) return decodeCustomerHistoryEscapedString(directMatch[1]);
+
+  const genericMatch = Array.from(String(snippet || '').matchAll(/"url":"(https:\\u002F\\u002F[^"]*\\u002Fvendas\\u002F[^"]*\\u002Fdetalhe[^"]*)"/gi))
+    .map((match) => decodeCustomerHistoryEscapedString(match[1]))
+    .find((url) => url.includes(`/vendas/${sale}/detalhe`));
+
+  return genericMatch || '';
+}
+
+function parseCustomerHistorySearchResults(html, targetLogin = '') {
+  const source = String(html || '');
+  if (!source) return [];
+
+  const markers = Array.from(source.matchAll(/identificationData":\{"id":"#(\d+)"/g));
+  if (!markers.length) return [];
+
+  const targetLoginKey = getOrderPickerSearchKey(targetLogin);
+  const results = [];
+
+  markers.forEach((marker, index) => {
+    const saleNumber = normalizeOrderPickerSaleNumber(marker[1]);
+    const start = marker.index || 0;
+    const end = index + 1 < markers.length ? (markers[index + 1].index || source.length) : source.length;
+    const snippet = source.slice(start, end);
+    const login = decodeCustomerHistoryEscapedString((snippet.match(/"nickName":"([^"]+)"/) || [])[1] || '');
+    const normalizedLogin = normalizeOrderPickerLogin(login);
+
+    if (targetLoginKey && getOrderPickerSearchKey(normalizedLogin) !== targetLoginKey) return;
+
+    const entry = normalizeCustomerHistoryEntry({
+      saleNumber,
+      login: normalizedLogin,
+      date: decodeCustomerHistoryEscapedString((snippet.match(/"date":"([^"]+)"/) || [])[1] || ''),
+      model: pickCustomerHistoryModel(snippet),
+      sizesText: extractCustomerHistorySizes(snippet),
+      messageUrl: decodeCustomerHistoryEscapedString((snippet.match(/"messengerLink":\{[\s\S]*?"url":"([^"]+)"/) || [])[1] || ''),
+      detailUrl: extractCustomerHistoryDetailUrl(snippet, saleNumber),
+      sortIndex: index
+    });
+
+    if (entry) results.push(entry);
+  });
+
+  const unique = [];
+  const seen = new Set();
+  results.forEach((entry) => {
+    if (seen.has(entry.saleNumber)) return;
+    seen.add(entry.saleNumber);
+    unique.push(entry);
+  });
+
+  return unique;
+}
+
+function buildCustomerHistorySearchUrl(login) {
+  return `${window.location.origin}/vendas/omni/lista?filters=&subFilters=&search=${encodeURIComponent(login)}&limit=50&offset=0`;
+}
+
+function performCustomerHistoryLookup(login) {
+  return new Promise((resolve, reject) => {
+    const iframe = document.createElement('iframe');
+    let pollTimer = null;
+    let timeoutTimer = null;
+    let settled = false;
+
+    const cleanup = () => {
+      settled = true;
+      if (pollTimer) clearInterval(pollTimer);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      iframe.remove();
+    };
+
+    const finish = (callback) => {
+      if (settled) return;
+      cleanup();
+      callback();
+    };
+
+    const attemptRead = (allowEmpty = false) => {
+      try {
+        const html = iframe.contentDocument?.documentElement?.outerHTML || '';
+        if (!html) return false;
+        const results = parseCustomerHistorySearchResults(html, login);
+        const text = iframe.contentDocument?.body?.innerText || '';
+        if (results.length || /nenhum|nao encontramos|sem resultados/i.test(text) || (allowEmpty && iframe.contentDocument?.readyState === 'complete')) {
+          finish(() => resolve(results));
+          return true;
+        }
+      } catch (_) {
+        return false;
+      }
+
+      return false;
+    };
+
+    iframe.style.cssText = 'position:fixed;width:1px;height:1px;opacity:0;pointer-events:none;right:0;bottom:0;border:0;z-index:-1;';
+    iframe.setAttribute('aria-hidden', 'true');
+
+    iframe.addEventListener('load', () => {
+      if (attemptRead()) return;
+
+      let attempts = 0;
+      pollTimer = setInterval(() => {
+        attempts += 1;
+        if (attemptRead(attempts >= 12) || attempts >= 12) {
+          if (!settled) finish(() => resolve(parseCustomerHistorySearchResults(iframe.contentDocument?.documentElement?.outerHTML || '', login)));
+        }
+      }, 400);
+    }, { once: true });
+
+    iframe.addEventListener('error', () => {
+      finish(() => reject(new Error('Não foi possível carregar a página de busca do Mercado Livre.')));
+    }, { once: true });
+
+    timeoutTimer = setTimeout(() => {
+      finish(() => reject(new Error('A consulta de recompra demorou demais para responder.')));
+    }, 12000);
+
+    document.documentElement.appendChild(iframe);
+    iframe.src = buildCustomerHistorySearchUrl(login);
+  });
+}
+
+function syncCustomerHistoryButton() {
+  const button = document.getElementById('sp-btn-history');
+  const badge = document.getElementById('sp-history-badge');
+  if (!button) return;
+
+  const state = loadCustomerHistoryState();
+  const overlayVisible = Boolean(document.getElementById('sp-customer-history-overlay'));
+  const previousCount = state.previousOrders.length;
+  const shouldHighlight = overlayVisible || previousCount > 0;
+
+  button.classList.toggle('sp-active', shouldHighlight);
+  button.dataset.loading = state.status === 'loading' ? 'true' : 'false';
+  if (badge) {
+    badge.textContent = previousCount > 0 ? String(previousCount) : '';
+    badge.dataset.count = previousCount;
+  }
+
+  if (state.status === 'loading') {
+    button.title = `Recompra: consultando pedidos anteriores de ${state.login || 'cliente'}`;
+    return;
+  }
+
+  if (previousCount > 0) {
+    button.title = `Recompra: ${previousCount} pedido${previousCount === 1 ? '' : 's'} anterior${previousCount === 1 ? '' : 'es'} de ${state.login || 'cliente'}`;
+    return;
+  }
+
+  if (state.status === 'error') {
+    button.title = `Recompra: ${state.error || 'falha na consulta'}`;
+    return;
+  }
+
+  button.title = 'Pedidos anteriores do cliente';
+}
+
+function makeCustomerHistoryOverlayDraggable(container) {
+  const handle = container.querySelector('[data-customer-history-drag]');
+  if (!handle) return;
+
+  let isDragging = false;
+  let startX = 0;
+  let startY = 0;
+  let startLeft = 0;
+  let startTop = 0;
+
+  handle.addEventListener('mousedown', (event) => {
+    if (event.button !== 0 || event.target.closest('button, a')) return;
+    event.preventDefault();
+
+    const rect = container.getBoundingClientRect();
+    isDragging = true;
+    startX = event.clientX;
+    startY = event.clientY;
+    startLeft = rect.left;
+    startTop = rect.top;
+
+    container.style.left = `${rect.left}px`;
+    container.style.top = `${rect.top}px`;
+    container.style.right = 'auto';
+    container.style.bottom = 'auto';
+    handle.style.cursor = 'grabbing';
+
+    const onMove = (moveEvent) => {
+      if (!isDragging) return;
+
+      const nextLeft = Math.max(0, Math.min(startLeft + moveEvent.clientX - startX, window.innerWidth - container.offsetWidth));
+      const nextTop = Math.max(0, Math.min(startTop + moveEvent.clientY - startY, window.innerHeight - container.offsetHeight));
+      container.style.left = `${nextLeft}px`;
+      container.style.top = `${nextTop}px`;
+    };
+
+    const onUp = () => {
+      if (!isDragging) return;
+      isDragging = false;
+      handle.style.cursor = 'grab';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      chrome.storage.local.set({
+        [CUSTOMER_HISTORY_POSITION_KEY]: {
+          left: container.style.left,
+          top: container.style.top
+        }
+      });
+    };
+
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+}
+
+function buildCustomerHistoryCard(entry) {
+  const safeModel = escapeHtml(entry.model || 'Produto sem modelo identificado');
+  const safeSale = escapeHtml(entry.saleNumber);
+  const safeDate = escapeHtml(entry.date || 'Data indisponivel');
+  const safeSizes = escapeHtml(entry.sizesText || '');
+  const messageUrl = escapeHtml(entry.messageUrl || '');
+  const detailUrl = escapeHtml(entry.detailUrl || '');
+
+  return `
+    <article style="padding:12px;border:1px solid rgba(34,197,94,0.16);border-radius:14px;background:rgba(18,24,27,0.84);box-shadow:0 12px 28px rgba(2,6,23,0.22);">
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px;">
+        <div style="min-width:0;">
+          <strong style="display:block;font-size:13px;line-height:1.4;color:#f8fafc;">${safeModel}</strong>
+          <div style="margin-top:4px;font-size:12px;color:rgba(226,232,240,0.8);">#${safeSale} • ${safeDate}</div>
+          ${safeSizes ? `<div style="margin-top:4px;font-size:12px;color:#bbf7d0;">${safeSizes}</div>` : ''}
+        </div>
+        <span style="flex:0 0 auto;padding:4px 8px;border-radius:999px;background:rgba(34,197,94,0.14);color:#bbf7d0;font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">Anterior</span>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        ${messageUrl ? `<a href="${messageUrl}" target="_blank" rel="noreferrer noopener" style="display:inline-flex;align-items:center;justify-content:center;padding:8px 12px;border-radius:10px;background:linear-gradient(135deg,#16a34a,#15803d);color:#fff;text-decoration:none;font-size:12px;font-weight:700;">Ver mensagens</a>` : ''}
+        ${detailUrl ? `<a href="${detailUrl}" target="_blank" rel="noreferrer noopener" style="display:inline-flex;align-items:center;justify-content:center;padding:8px 12px;border-radius:10px;border:1px solid rgba(148,163,184,0.28);background:rgba(255,255,255,0.04);color:#e2e8f0;text-decoration:none;font-size:12px;font-weight:600;">Abrir pedido</a>` : ''}
+      </div>
+    </article>
+  `;
+}
+
+function closeCustomerHistoryOverlay() {
+  document.getElementById('sp-customer-history-overlay')?.remove();
+  syncCustomerHistoryButton();
+}
+
+function renderCustomerHistoryOverlay() {
+  closeCustomerHistoryOverlay();
+
+  const state = loadCustomerHistoryState();
+  const overlay = document.createElement('div');
+  overlay.id = 'sp-customer-history-overlay';
+  overlay.style.cssText = 'position:fixed;top:16px;right:16px;width:min(380px,calc(100vw - 24px));max-height:min(78vh,720px);padding:14px;border-radius:18px;background:linear-gradient(180deg,rgba(12,20,16,0.97),rgba(17,24,39,0.96));border:1px solid rgba(34,197,94,0.14);color:#fff;z-index:10002;box-shadow:0 24px 48px rgba(2,6,23,0.35);backdrop-filter:blur(10px);overflow:hidden;font-family:\'Segoe UI\',system-ui,-apple-system,sans-serif;';
+  applyHubTheme(overlay);
+
+  const summaryText = state.previousOrders.length
+    ? `${state.previousOrders.length} pedido${state.previousOrders.length === 1 ? '' : 's'} anterior${state.previousOrders.length === 1 ? '' : 'es'}`
+    : state.status === 'loading'
+      ? 'Consultando pedidos anteriores...'
+      : state.status === 'error'
+        ? state.error || 'Não foi possível consultar a recompra.'
+        : 'Nenhum pedido anterior encontrado.';
+
+  overlay.innerHTML = `
+    <div data-customer-history-drag style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px;cursor:grab;user-select:none;">
+      <div style="min-width:0;">
+        <span style="display:inline-flex;align-items:center;padding:4px 8px;border-radius:999px;background:rgba(34,197,94,0.14);color:#bbf7d0;font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;">Recompra</span>
+        <strong style="display:block;margin-top:8px;font-size:16px;line-height:1.2;color:#f8fafc;">${escapeHtml(state.login || 'Cliente')}</strong>
+        <p style="margin:6px 0 0;font-size:12px;line-height:1.45;color:rgba(226,232,240,0.82);">${escapeHtml(summaryText)}</p>
+      </div>
+      <button type="button" data-customer-history-close style="width:30px;height:30px;border-radius:999px;border:1px solid rgba(255,255,255,0.16);background:rgba(255,255,255,0.06);color:#e2e8f0;cursor:pointer;font-size:16px;line-height:1;">×</button>
+    </div>
+    <div style="margin-bottom:12px;padding:10px 12px;border-radius:12px;background:rgba(255,255,255,0.05);font-size:12px;color:rgba(226,232,240,0.88);">
+      Venda atual: <strong style="color:#f8fafc;">${state.saleNumber ? `#${escapeHtml(state.saleNumber)}` : 'Não identificada'}</strong>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:10px;max-height:min(58vh,560px);overflow:auto;padding-right:4px;">
+      ${state.previousOrders.length
+        ? state.previousOrders.map(buildCustomerHistoryCard).join('')
+        : `<div style="padding:14px;border-radius:14px;background:rgba(255,255,255,0.05);font-size:13px;line-height:1.5;color:rgba(226,232,240,0.86);">${escapeHtml(summaryText)}</div>`}
+    </div>
+  `;
+
+  document.body.appendChild(overlay);
+
+  chrome.storage.local.get([CUSTOMER_HISTORY_POSITION_KEY], (result) => {
+    const saved = result?.[CUSTOMER_HISTORY_POSITION_KEY];
+    if (saved?.left && saved?.top) {
+      overlay.style.left = saved.left;
+      overlay.style.top = saved.top;
+      overlay.style.right = 'auto';
+      overlay.style.bottom = 'auto';
+    }
+  });
+
+  overlay.querySelector('[data-customer-history-close]')?.addEventListener('click', closeCustomerHistoryOverlay);
+  makeCustomerHistoryOverlayDraggable(overlay);
+  syncCustomerHistoryButton();
+}
+
+async function toggleCustomerHistoryOverlay() {
+  if (document.getElementById('sp-customer-history-overlay')) {
+    closeCustomerHistoryOverlay();
+    return;
+  }
+
+  let state = loadCustomerHistoryState();
+  if ((!state.login || !state.saleNumber) && getCurrentCustomerHistoryContext()) {
+    state = await queueCustomerHistoryLookup();
+  }
+
+  if (!state.login || !state.saleNumber) {
+    mostrarNotificacao('Abra um pedido para consultar recompra.', 'error');
+    return;
+  }
+
+  renderCustomerHistoryOverlay();
+}
+
+function maybeAnnounceCustomerHistory(state) {
+  syncCustomerHistoryPersistentNotification(state);
+  return state;
+}
+
+async function queueCustomerHistoryLookup(options = {}) {
+  const { force = false } = options;
+  const context = getCurrentCustomerHistoryContext();
+  if (!context) {
+    syncCustomerHistoryButton();
+    return loadCustomerHistoryState();
+  }
+
+  const currentState = loadCustomerHistoryState();
+  const requestKey = getCustomerHistoryRequestKey(context.login, context.saleNumber);
+
+  if (!force && currentState.requestKey === requestKey && (currentState.status === 'loading' || currentState.status === 'loaded')) {
+    syncCustomerHistoryPersistentNotification(currentState);
+    syncCustomerHistoryButton();
+    return currentState.status === 'loaded' ? maybeAnnounceCustomerHistory(currentState) : currentState;
+  }
+
+  const requestId = `${Date.now()}_${++customerHistoryLookupSequence}`;
+  const nextState = saveCustomerHistoryState({
+    login: context.login,
+    saleNumber: context.saleNumber,
+    sourceUrl: context.sourceUrl,
+    requestId,
+    requestKey,
+    status: 'loading',
+    error: '',
+    results: [],
+    previousOrders: [],
+    updatedAt: Date.now()
+  });
+
+  syncCustomerHistoryPersistentNotification(nextState);
+  syncCustomerHistoryButton();
+
+  try {
+    await chrome.runtime.sendMessage({
+      action: 'enqueueCustomerHistoryLookup',
+      login: context.login,
+      saleNumber: context.saleNumber,
+      requestId
+    });
+  } catch (error) {
+    const failedState = saveCustomerHistoryState({
+      requestId,
+      requestKey,
+      status: 'error',
+      error: error instanceof Error ? error.message : 'Não foi possível iniciar a consulta de recompra.',
+      updatedAt: Date.now()
+    });
+    syncCustomerHistoryPersistentNotification(failedState);
+    syncCustomerHistoryButton();
+    return failedState;
+  }
+
+  if (document.getElementById('sp-customer-history-overlay')) {
+    renderCustomerHistoryOverlay();
+  }
+
+  return nextState;
+}
+
+function applyCustomerHistoryLookupResult(message) {
+  const state = loadCustomerHistoryState();
+  const requestId = String(message.requestId || '').trim();
+
+  if (!requestId || requestId !== state.requestId) return;
+
+  if (message.error) {
+    const failedState = saveCustomerHistoryState({
+      status: 'error',
+      error: String(message.error || 'Não foi possível consultar pedidos anteriores.'),
+      results: [],
+      previousOrders: [],
+      updatedAt: Date.now()
+    });
+
+    if (document.getElementById('sp-customer-history-overlay')) {
+      renderCustomerHistoryOverlay();
+    }
+
+    syncCustomerHistoryPersistentNotification(failedState);
+    syncCustomerHistoryButton();
+    return failedState;
+  }
+
+  const normalizedResults = Array.isArray(message.results)
+    ? message.results.map(normalizeCustomerHistoryEntry).filter(Boolean)
+    : [];
+  const liveCurrentSales = new Set();
+  const liveSaleNumber = extractCurrentCustomerHistorySaleNumberFromPage();
+  if (liveSaleNumber) liveCurrentSales.add(liveSaleNumber);
+  const currentDateKey = getCurrentCustomerHistoryPageDate();
+
+  const currentSaleCandidates = new Set(liveCurrentSales);
+  if (!currentSaleCandidates.size) {
+    [message.saleNumber, state.saleNumber].forEach((value) => {
+      const normalized = normalizeOrderPickerSaleNumber(value);
+      if (normalized) currentSaleCandidates.add(normalized);
+    });
+  }
+
+  let currentIndex = normalizedResults.findIndex((entry) => currentSaleCandidates.has(entry.saleNumber));
+  if (currentIndex < 0 && currentDateKey) {
+    currentIndex = normalizedResults.findIndex((entry) => normalizeCustomerHistoryDateKey(entry.date) === currentDateKey);
+  }
+
+  if (currentIndex < 0) {
+    const loadedState = saveCustomerHistoryState({
+      status: 'loaded',
+      error: '',
+      results: normalizedResults,
+      previousOrders: [],
+      updatedAt: Date.now()
+    });
+
+    if (document.getElementById('sp-customer-history-overlay')) {
+      renderCustomerHistoryOverlay();
+    }
+
+    syncCustomerHistoryPersistentNotification(loadedState);
+    syncCustomerHistoryButton();
+    return loadedState;
+  }
+
+  const sortDirection = getCustomerHistorySortDirection(normalizedResults);
+  const previousOrders = normalizedResults.filter((entry, index) => {
+    if (currentSaleCandidates.has(entry.saleNumber)) return false;
+    if (currentDateKey && normalizeCustomerHistoryDateKey(entry.date) === currentDateKey) return false;
+    return sortDirection === 'asc' ? index < currentIndex : index > currentIndex;
+  });
+
+  const loadedState = saveCustomerHistoryState({
+    status: 'loaded',
+    error: '',
+    results: normalizedResults,
+    previousOrders,
+    updatedAt: Date.now()
+  });
+
+  if (document.getElementById('sp-customer-history-overlay')) {
+    renderCustomerHistoryOverlay();
+  }
+
+  syncCustomerHistoryPersistentNotification(loadedState);
+  syncCustomerHistoryButton();
+  return maybeAnnounceCustomerHistory(loadedState);
+}
+
 let isMonitoring = true;
 let observer = null;
 let checkInterval = null;
 let lastProcessedContent = '';
+let rangerPersistentCases = [];
+let customerHistoryPersistentCase = null;
 
 initialize();
 
@@ -4014,16 +5173,45 @@ function checkForOrders() {
     let wasObserverActive = false;
     if (observer) { observer.disconnect(); wasObserverActive = true; }
     foundCases = detectAndHighlightCases();
-    if (foundCases.length > 0) {
-      showPersistentNotification([...new Set(foundCases)]);
-    } else {
-      const existingNotif = document.getElementById('sentinela-persistent-notification');
-      if (existingNotif) existingNotif.remove();
-    }
+    rangerPersistentCases = [...new Set(foundCases)];
+    syncPersistentNotificationPanel();
     if (wasObserverActive && observer) {
       observer.observe(document.body, { childList: true, subtree: true, characterData: true });
     }
   } catch (error) { console.error('Erro ao destacar/mostrar notificação:', error); }
+}
+
+function syncCustomerHistoryPersistentNotification(state = loadCustomerHistoryState()) {
+  if (!state.previousOrders.length) {
+    customerHistoryPersistentCase = null;
+    syncPersistentNotificationPanel();
+    return;
+  }
+
+  customerHistoryPersistentCase = {
+    id: `history:${state.requestKey}`,
+    label: `${state.previousOrders.length} pedido${state.previousOrders.length === 1 ? '' : 's'} anterior${state.previousOrders.length === 1 ? '' : 'es'} de ${state.login}`,
+    tone: 'history',
+    actionLabel: 'Abrir histórico',
+    onClick: () => {
+      renderCustomerHistoryOverlay();
+    }
+  };
+
+  syncPersistentNotificationPanel();
+}
+
+function syncPersistentNotificationPanel() {
+  const items = [
+    ...rangerPersistentCases.map((label) => ({ label, tone: 'alert' })),
+    ...(customerHistoryPersistentCase ? [customerHistoryPersistentCase] : [])
+  ];
+
+  if (items.length > 0) {
+    showPersistentNotification(items);
+  } else {
+    document.getElementById('sentinela-persistent-notification')?.remove();
+  }
 }
 
 function detectAndHighlightCases() {
@@ -4166,10 +5354,27 @@ function makeElementDraggable(elementToDrag, handleElement) {
 
 function showPersistentNotification(cases) {
   if (window.location.href.startsWith('https://www.mercadolivre.com.br/vendas/omni/lista')) return;
-  const casesKey = cases.join('||');
+  const normalizedCases = (Array.isArray(cases) ? cases : [])
+    .map((item, index) => {
+      if (typeof item === 'string') {
+        return { id: `case-${index}-${item}`, label: item, tone: 'alert', actionLabel: '', onClick: null };
+      }
+
+      if (!item || typeof item !== 'object') return null;
+      return {
+        id: String(item.id || `case-${index}`),
+        label: String(item.label || '').trim(),
+        tone: item.tone === 'history' ? 'history' : 'alert',
+        actionLabel: String(item.actionLabel || '').trim(),
+        onClick: typeof item.onClick === 'function' ? item.onClick : null
+      };
+    })
+    .filter((item) => item && item.label);
+  const casesKey = normalizedCases.map((item) => `${item.id}:${item.label}:${item.tone}:${item.actionLabel}`).join('||');
   const existingPanel = document.getElementById('sentinela-persistent-notification');
   if (existingPanel && existingPanel.dataset.casesKey === casesKey) return;
   if (existingPanel) existingPanel.remove();
+  if (!normalizedCases.length) return;
 
   if (!document.getElementById('sentinela-overlay-styles')) {
     const style = document.createElement('style');
@@ -4183,13 +5388,17 @@ function showPersistentNotification(cases) {
     document.head.appendChild(style);
   }
 
+  const hasOnlyHistory = normalizedCases.every((item) => item.tone === 'history');
+  const accent = hasOnlyHistory ? '#22c55e' : '#ef4444';
+  const accentGradient = hasOnlyHistory ? 'linear-gradient(90deg,#16a34a 0%,#22c55e 100%)' : 'linear-gradient(90deg,#ef4444 0%,#f97316 100%)';
+
   const panel = document.createElement('div');
   panel.id = 'sentinela-persistent-notification';
   panel.dataset.casesKey = casesKey;
   panel.style.cssText = `position:fixed;right:20px;bottom:50px;width:288px;background:#111827;border-radius:12px;box-shadow:0 0 0 1px rgba(255,255,255,0.07),0 4px 6px rgba(0,0,0,0.4),0 12px 28px rgba(0,0,0,0.55);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;overflow:hidden;user-select:none;z-index:999999;`;
 
   const topStripe = document.createElement('div');
-  topStripe.style.cssText = 'height:3px;background:linear-gradient(90deg,#ef4444 0%,#f97316 100%);';
+  topStripe.style.cssText = `height:3px;background:${accentGradient};`;
 
   const header = document.createElement('div');
   header.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:9px 11px 9px 13px;border-bottom:1px solid rgba(255,255,255,0.06);cursor:grab;';
@@ -4199,14 +5408,14 @@ function showPersistentNotification(cases) {
 
   const liveDot = document.createElement('span');
   liveDot.className = 'sn-dot-pulse';
-  liveDot.style.cssText = 'display:inline-block;width:7px;height:7px;background:#ef4444;border-radius:50%;flex-shrink:0;';
+  liveDot.style.cssText = `display:inline-block;width:7px;height:7px;background:${accent};border-radius:50%;flex-shrink:0;`;
 
   const badge = document.createElement('span');
   badge.textContent = 'SENTINELA PRO';
-  badge.style.cssText = 'font-size:10px;font-weight:800;letter-spacing:1.2px;color:#ef4444;text-transform:uppercase;';
+  badge.style.cssText = `font-size:10px;font-weight:800;letter-spacing:1.2px;color:${accent};text-transform:uppercase;`;
 
   const countBadge = document.createElement('span');
-  countBadge.textContent = `${cases.length} alerta${cases.length > 1 ? 's' : ''}`;
+  countBadge.textContent = `${normalizedCases.length} alerta${normalizedCases.length > 1 ? 's' : ''}`;
   countBadge.style.cssText = 'font-size:10px;font-weight:500;color:#6b7280;';
 
   headerLeft.appendChild(liveDot);
@@ -4216,7 +5425,7 @@ function showPersistentNotification(cases) {
   const closeBtn = document.createElement('button');
   closeBtn.innerHTML = '&#10005;';
   closeBtn.style.cssText = 'background:transparent;border:none;color:#4b5563;width:24px;height:24px;border-radius:6px;cursor:pointer;font-size:11px;display:flex;align-items:center;justify-content:center;padding:0;line-height:1;flex-shrink:0;transition:background 0.15s,color 0.15s;';
-  closeBtn.addEventListener('mouseenter', () => { closeBtn.style.background = 'rgba(239,68,68,0.15)'; closeBtn.style.color = '#ef4444'; });
+  closeBtn.addEventListener('mouseenter', () => { closeBtn.style.background = hasOnlyHistory ? 'rgba(34,197,94,0.15)' : 'rgba(239,68,68,0.15)'; closeBtn.style.color = accent; });
   closeBtn.addEventListener('mouseleave', () => { closeBtn.style.background = 'transparent'; closeBtn.style.color = '#4b5563'; });
   closeBtn.addEventListener('mousedown', (e) => e.stopPropagation());
   closeBtn.addEventListener('click', (e) => { e.stopPropagation(); panel.remove(); });
@@ -4234,15 +5443,28 @@ function showPersistentNotification(cases) {
   const itemList = document.createElement('div');
   itemList.style.cssText = 'display:flex;flex-direction:column;gap:4px;';
 
-  cases.forEach(c => {
+  normalizedCases.forEach((itemData) => {
+    const isHistory = itemData.tone === 'history';
     const item = document.createElement('div');
-    item.style.cssText = 'display:flex;align-items:center;gap:8px;padding:6px 9px;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.18);border-radius:6px;';
+    item.style.cssText = `display:flex;align-items:flex-start;gap:8px;padding:6px 9px;background:${isHistory ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)'};border:1px solid ${isHistory ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.18)'};border-radius:6px;${itemData.onClick ? 'cursor:pointer;' : ''}`;
     const dot = document.createElement('span');
-    dot.style.cssText = 'width:5px;height:5px;background:#ef4444;border-radius:50%;flex-shrink:0;';
+    dot.style.cssText = `width:5px;height:5px;background:${isHistory ? '#22c55e' : '#ef4444'};border-radius:50%;flex-shrink:0;margin-top:6px;`;
+    const content = document.createElement('div');
+    content.style.cssText = 'display:flex;flex-direction:column;gap:4px;min-width:0;';
     const txt = document.createElement('span');
-    txt.textContent = c;
+    txt.textContent = itemData.label;
     txt.style.cssText = 'font-size:12.5px;color:#e5e7eb;line-height:1.35;';
-    item.appendChild(dot); item.appendChild(txt); itemList.appendChild(item);
+    content.appendChild(txt);
+    if (itemData.actionLabel) {
+      const action = document.createElement('span');
+      action.textContent = itemData.actionLabel;
+      action.style.cssText = `font-size:11px;font-weight:700;color:${isHistory ? '#86efac' : '#fca5a5'};letter-spacing:0.02em;text-transform:uppercase;`;
+      content.appendChild(action);
+    }
+    item.appendChild(dot);
+    item.appendChild(content);
+    if (itemData.onClick) item.addEventListener('click', () => itemData.onClick());
+    itemList.appendChild(item);
   });
 
   const footer = document.createElement('div');
@@ -4287,21 +5509,53 @@ function playAlertSound() {
   } catch (e) { console.error('Erro ao criar áudio:', e); }
 }
 
-function showInPageNotification(orderNumber) {
+function showInPageNotification(orderNumber, options = {}) {
+  const {
+    variant = 'alert',
+    title = 'ALERTA !',
+    message = 'Detectado pedido com 2 unidades',
+    detail = orderNumber,
+    durationMs = 20000,
+    onClick = null
+  } = options;
+
+  document.getElementById('sentinela-floating-notification')?.remove();
+
+  const palette = variant === 'customer-history'
+    ? {
+        background: 'linear-gradient(135deg,#16a34a 0%,#15803d 100%)',
+        accent: '#bbf7d0'
+      }
+    : {
+        background: 'linear-gradient(135deg,#667eea 0%,#764ba2 100%)',
+        accent: '#ffffff'
+      };
+
   const notification = document.createElement('div');
-  notification.style.cssText = `position:fixed;top:20px;right:20px;background:linear-gradient(135deg,#667eea 0%,#764ba2 100%);color:white;padding:15px 20px;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.3);z-index:999999;font-family:Arial,sans-serif;font-size:14px;font-weight:bold;max-width:300px;animation:slideIn 0.5s ease-out;`;
-  const style = document.createElement('style');
-  style.textContent = `@keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}@keyframes slideOut{from{transform:translateX(0);opacity:1}to{transform:translateX(100%);opacity:0}}`;
-  document.head.appendChild(style);
-  notification.innerHTML = `<div style="display:flex;align-items:center;margin-bottom:8px;"><strong> ALERTA !</strong></div><div>Detectado pedido com 2 unidades</div><div style="margin-top:5px;font-size:12px;opacity:0.9;">${orderNumber}</div>`;
+  notification.id = 'sentinela-floating-notification';
+  notification.style.cssText = `position:fixed;top:20px;right:20px;background:${palette.background};color:white;padding:15px 20px;border-radius:10px;box-shadow:0 4px 20px rgba(0,0,0,0.3);z-index:999999;font-family:Arial,sans-serif;font-size:14px;font-weight:bold;max-width:320px;animation:slideIn 0.5s ease-out;cursor:pointer;`;
+
+  if (!document.getElementById('sentinela-floating-notification-style')) {
+    const style = document.createElement('style');
+    style.id = 'sentinela-floating-notification-style';
+    style.textContent = `@keyframes slideIn{from{transform:translateX(100%);opacity:0}to{transform:translateX(0);opacity:1}}@keyframes slideOut{from{transform:translateX(0);opacity:1}to{transform:translateX(100%);opacity:0}}`;
+    document.head.appendChild(style);
+  }
+
+  notification.innerHTML = `<div style="display:flex;align-items:center;margin-bottom:8px;"><strong style="color:${palette.accent};">${escapeHtml(title)}</strong></div><div>${escapeHtml(message)}</div>${detail ? `<div style="margin-top:5px;font-size:12px;opacity:0.9;">${escapeHtml(detail)}</div>` : ''}`;
   document.body.appendChild(notification);
-  setTimeout(() => {
+
+  const dismiss = () => {
     notification.style.animation = 'slideOut 0.5s ease-out';
-    setTimeout(() => { if (notification.parentNode) notification.parentNode.removeChild(notification); }, 500);
-  }, 20000);
+    setTimeout(() => {
+      if (notification.parentNode) notification.parentNode.removeChild(notification);
+    }, 500);
+  };
+
+  setTimeout(dismiss, durationMs);
   notification.addEventListener('click', () => {
-    notification.style.animation = 'slideOut 0.5s ease-out';
-    setTimeout(() => { if (notification.parentNode) notification.parentNode.removeChild(notification); }, 500);
+    dismiss();
+    if (typeof onClick === 'function') onClick();
   });
 }
 
@@ -4345,6 +5599,7 @@ function syncHubTheme() {
   applyHubTheme(document.getElementById('sp-auth-panel'));
   applyHubTheme(document.getElementById('sp-gestor-panel'));
   applyHubTheme(document.getElementById('sp-order-panel'));
+  applyHubTheme(document.getElementById('sp-customer-history-overlay'));
   applyHubTheme(document.getElementById('sp-gestor-batch-overlay'));
   applyHubTheme(document.getElementById('extensao-popup-overlay'), { isClip: true });
 }
@@ -6133,6 +7388,15 @@ function monitorarMudancasURL() {
           mostrarNotificacaoURL('URL atualizado');
         }
       }
+
+      if (isOrderDetailMonitoringPage() || isCustomerHistoryMessagePage()) {
+        primeGestorCapturedSession();
+        queueCustomerHistoryLookup().catch((error) => {
+          console.error('[Sentinela Pro] Falha ao atualizar recompra apos troca de URL:', error);
+        });
+      } else {
+        syncCustomerHistoryButton();
+      }
     }
   }, 500);
 }
@@ -6152,6 +7416,15 @@ if (window.location.hostname.includes('mercadolivre.com.br') || window.location.
     } else if (dadosJaSalvos.url !== window.location.href) {
       await atualizarApenasURLClip(window.location.href);
     }
+
+    if (isOrderDetailMonitoringPage() || isCustomerHistoryMessagePage()) {
+      primeGestorCapturedSession();
+      queueCustomerHistoryLookup().catch((error) => {
+        console.error('[Sentinela Pro] Falha ao iniciar consulta de recompra:', error);
+      });
+    } else {
+      syncCustomerHistoryButton();
+    }
   });
 }
 
@@ -6163,6 +7436,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'playAlert') {
     playAlertSound();
     showInPageNotification(message.orderNumber);
+    return;
+  }
+  if (message.action === 'run_customer_history_lookup') {
+    performCustomerHistoryLookup(message.login).then((results) => {
+      sendResponse({ ok: true, results });
+    }).catch((error) => {
+      sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error || 'Falha ao consultar recompra.')
+      });
+    });
+    return true;
+  }
+  if (message.action === 'customerHistoryLookupResult') {
+    applyCustomerHistoryLookupResult(message);
     return;
   }
   if (message.action === 'monitoringStatusChanged') {

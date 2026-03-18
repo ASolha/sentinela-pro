@@ -20,6 +20,24 @@
       --sh-md:0 4px 6px -1px rgba(0,0,0,.4);
       --sh-lg:0 10px 15px -3px rgba(0,0,0,.5);
     }
+    #mr-panel ::selection,
+    #sp-gestor-panel ::selection,
+    #sp-order-panel ::selection,
+    #sp-auth-panel ::selection,
+    #sp-customer-history-overlay ::selection,
+    #extensao-popup-overlay ::selection{
+      background:rgba(96,165,250,.38);
+      color:#f8fafc;
+    }
+    #mr-panel.sp-theme-light ::selection,
+    #sp-gestor-panel.sp-theme-light ::selection,
+    #sp-order-panel.sp-theme-light ::selection,
+    #sp-auth-panel.sp-theme-light ::selection,
+    #sp-customer-history-overlay.sp-theme-light ::selection,
+    #extensao-popup-overlay.sp-theme-light ::selection{
+      background:rgba(37,99,235,.18);
+      color:#0f172a;
+    }
     /* Panel */
     #mr-panel{
       position:fixed;width:355px;max-height:calc(100vh - 32px);
@@ -116,7 +134,7 @@
       user-select:none;white-space:nowrap;overflow:hidden;flex-shrink:0;
     }
     .mr-ct:hover{background:var(--bghov);color:var(--txt);}
-    .mr-ct.active{background:var(--accent);color:#fff;border-color:transparent;}
+    .mr-ct.active{background:var(--accent);color:#fff;border-color:var(--accent);box-shadow:0 0 0 2px rgba(59,130,246,.18),0 8px 18px rgba(15,23,42,.18);}
     .mr-ct-icon{font-size:13px;flex-shrink:0;width:24px;text-align:center;line-height:1;}
     .mr-ct-name{
       font-size:11px;font-weight:500;overflow:hidden;
@@ -350,7 +368,7 @@
     .ms-sb-list::-webkit-scrollbar-thumb { background: var(--bghov); border-radius: 3px; }
     .ms-cr { display: flex; align-items: center; gap: 6px; padding: 7px 10px; border-radius: 6px; cursor: pointer; transition: all 150ms ease; border: 1.5px solid transparent; margin-bottom: 3px; user-select: none; }
     .ms-cr:hover { background: var(--bg2); }
-    .ms-cr.ms-active { background: var(--accentlt); border-color: var(--accent); }
+    .ms-cr.ms-active { background: var(--accentlt); border-color: var(--accent); box-shadow: 0 0 0 2px rgba(59,130,246,.16), 0 10px 20px rgba(15,23,42,.08); }
     .ms-cr.ms-dragover { border-color: var(--accent); background: var(--accentlt); }
     .ms-cr.ms-dragging { opacity: .35; }
     .ms-drag { cursor: grab; color: var(--txt3); font-size: 16px; opacity: .4; transition: opacity 150ms ease; }
@@ -429,6 +447,11 @@
   gap: 8px;
 }
 
+.sp-topbar-side {
+  margin-left: 2px;
+  align-self: flex-start;
+}
+
 .sp-topbar-item {
   display: flex;
   flex-direction: column;
@@ -485,6 +508,14 @@
   flex-shrink: 0;
 }
 
+#sp-topbar .sp-btn svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  shape-rendering: geometricPrecision;
+}
+
 /* Passo Largo — blue */
 #sp-btn-passo {
   background: rgba(52, 131, 250, 0.12);
@@ -507,22 +538,22 @@
 
 /* Clip — indigo/violet */
 #sp-btn-clip {
-  background: rgba(99, 102, 241, 0.12);
-  border-color: rgba(99, 102, 241, 0.32);
-  color: #818cf8;
+  background: rgba(79, 70, 229, 0.14);
+  border-color: rgba(99, 102, 241, 0.36);
+  color: #a5b4fc;
 }
 #sp-btn-clip:hover {
-  background: rgba(99, 102, 241, 0.24);
-  border-color: rgba(99, 102, 241, 0.6);
-  color: #a5b4fc;
-  box-shadow: 0 0 16px rgba(99, 102, 241, 0.42), 0 3px 10px rgba(0, 0, 0, 0.35);
+  background: rgba(79, 70, 229, 0.28);
+  border-color: rgba(129, 140, 248, 0.72);
+  color: #c7d2fe;
+  box-shadow: 0 0 18px rgba(99, 102, 241, 0.38), 0 3px 10px rgba(0, 0, 0, 0.35);
   transform: translateY(-1px);
 }
 #sp-btn-clip.sp-active {
-  background: rgba(99, 102, 241, 0.3);
-  border-color: rgba(99, 102, 241, 0.75);
-  color: #c7d2fe;
-  box-shadow: 0 0 20px rgba(99, 102, 241, 0.5);
+  background: linear-gradient(180deg, rgba(79, 70, 229, 0.34) 0%, rgba(67, 56, 202, 0.3) 100%);
+  border-color: rgba(129, 140, 248, 0.82);
+  color: #e0e7ff;
+  box-shadow: 0 0 22px rgba(99, 102, 241, 0.46);
 }
 
 /* Counter — amber */
@@ -604,25 +635,73 @@
   box-shadow: 0 0 20px rgba(16, 185, 129, 0.5);
 }
 
+#sp-btn-history {
+  background: rgba(34, 197, 94, 0.18);
+  border-color: rgba(34, 197, 94, 0.42);
+  color: #86efac;
+}
+
+#sp-btn-history:hover {
+  background: rgba(34, 197, 94, 0.3);
+  border-color: rgba(74, 222, 128, 0.72);
+  color: #dcfce7;
+  box-shadow: 0 0 18px rgba(34, 197, 94, 0.45), 0 3px 10px rgba(0, 0, 0, 0.35);
+  transform: translateY(-1px);
+}
+
+#sp-btn-history.sp-active,
+#sp-btn-history[data-loading="true"] {
+  background: linear-gradient(180deg, rgba(22, 163, 74, 0.32) 0%, rgba(21, 128, 61, 0.28) 100%);
+  border-color: rgba(74, 222, 128, 0.82);
+  color: #f0fdf4;
+  box-shadow: 0 0 22px rgba(34, 197, 94, 0.55);
+}
+
+.sp-history-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  background: #22c55e;
+  color: #052e16;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3px;
+  border: 1.5px solid rgba(13, 17, 35, 0.97);
+  pointer-events: none;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.04);
+}
+
+.sp-history-badge:empty,
+.sp-history-badge[data-count="0"] {
+  display: none;
+}
+
 #sp-btn-gestor {
-  background: rgba(99, 102, 241, 0.12);
-  border-color: rgba(99, 102, 241, 0.32);
-  color: #a5b4fc;
+  background: rgba(139, 92, 246, 0.14);
+  border-color: rgba(139, 92, 246, 0.34);
+  color: #c4b5fd;
 }
 
 #sp-btn-gestor:hover {
-  background: rgba(99, 102, 241, 0.24);
-  border-color: rgba(99, 102, 241, 0.6);
-  color: #c7d2fe;
-  box-shadow: 0 0 16px rgba(99, 102, 241, 0.42), 0 3px 10px rgba(0, 0, 0, 0.35);
+  background: rgba(139, 92, 246, 0.26);
+  border-color: rgba(167, 139, 250, 0.72);
+  color: #e9d5ff;
+  box-shadow: 0 0 18px rgba(139, 92, 246, 0.4), 0 3px 10px rgba(0, 0, 0, 0.35);
   transform: translateY(-1px);
 }
 
 #sp-btn-gestor.sp-active {
-  background: rgba(99, 102, 241, 0.3);
-  border-color: rgba(99, 102, 241, 0.75);
-  color: #e0e7ff;
-  box-shadow: 0 0 20px rgba(99, 102, 241, 0.5);
+  background: linear-gradient(180deg, rgba(124, 58, 237, 0.34) 0%, rgba(109, 40, 217, 0.28) 100%);
+  border-color: rgba(196, 181, 253, 0.82);
+  color: #f5f3ff;
+  box-shadow: 0 0 22px rgba(139, 92, 246, 0.45);
 }
 
 .sp-gestor-badge {
@@ -770,7 +849,9 @@
 
 .sp-gestor-tab.is-active {
   background: linear-gradient(135deg, rgba(99, 102, 241, 0.28) 0%, rgba(59, 130, 246, 0.18) 100%);
+  border: 1px solid rgba(129, 140, 248, 0.42);
   color: #eef2ff;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.14), 0 10px 22px rgba(15, 23, 42, 0.18);
 }
 
 .sp-gestor-view {
@@ -1040,6 +1121,11 @@
   display: block;
 }
 
+.sp-gestor-card.is-expanded {
+  border-color: rgba(129, 140, 248, 0.28);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
 .sp-gestor-edit-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1116,6 +1202,7 @@
   background: rgba(99, 102, 241, 0.22);
   border-color: rgba(129, 140, 248, 0.58);
   color: #c7d2fe;
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.18), 0 8px 18px rgba(15, 23, 42, 0.18);
 }
 
 .sp-gestor-icon-btn--archive:hover {
@@ -1361,6 +1448,7 @@
 .sp-gestor-batch-item.is-selected {
   border-color: rgba(99, 102, 241, 0.42);
   background: rgba(99, 102, 241, 0.16);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.14), 0 12px 22px rgba(15, 23, 42, 0.16);
 }
 
 .sp-gestor-batch-item__check {
@@ -1472,24 +1560,39 @@
 }
 
 #sp-btn-auth {
-  background: rgba(236, 72, 153, 0.12);
-  border-color: rgba(236, 72, 153, 0.32);
-  color: #f472b6;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: transparent;
+  border-color: transparent;
+  color: rgba(226, 232, 240, 0.86);
+  box-shadow: none;
+  opacity: 1;
+}
+
+#sp-btn-auth svg {
+  width: 16px;
+  height: 16px;
 }
 
 #sp-btn-auth:hover {
-  background: rgba(236, 72, 153, 0.24);
-  border-color: rgba(236, 72, 153, 0.6);
-  color: #f9a8d4;
-  box-shadow: 0 0 16px rgba(236, 72, 153, 0.42), 0 3px 10px rgba(0, 0, 0, 0.35);
+  background: rgba(148, 163, 184, 0.12);
+  border-color: rgba(148, 163, 184, 0.24);
+  color: #f8fafc;
+  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.18);
   transform: translateY(-1px);
 }
 
 #sp-btn-auth.sp-active {
-  background: rgba(236, 72, 153, 0.3);
-  border-color: rgba(236, 72, 153, 0.75);
-  color: #fbcfe8;
-  box-shadow: 0 0 20px rgba(236, 72, 153, 0.5);
+  background: transparent;
+  border-color: transparent;
+  color: #ffffff;
+  box-shadow: none;
+}
+
+#sp-btn-auth.sp-btn-auth-icon {
+  padding: 0;
+  min-width: 28px;
 }
 
 .sp-auth-badge {
@@ -1518,7 +1621,7 @@
 }
 
 .sp-auth-badge[data-connected="true"] {
-  background: #ec4899;
+  background: #64748b;
 }
 
 #sp-auth-panel {
@@ -1552,6 +1655,12 @@
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 10px;
+}
+
+.sp-auth-panel__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .sp-auth-panel__header strong {
@@ -1600,6 +1709,57 @@
   background: rgba(255, 255, 255, 0.06);
   color: #fff;
   font-size: 15px;
+}
+
+.sp-auth-inline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sp-auth-inline .sp-auth-field input,
+.sp-auth-inline input {
+  margin: 0;
+}
+
+.sp-auth-display-name {
+  margin-bottom: 12px;
+}
+
+.sp-auth-display-name:not(.is-editing) .sp-auth-field {
+  margin-bottom: 0;
+}
+
+.sp-auth-display-name input[readonly] {
+  opacity: 0.88;
+  cursor: default;
+}
+
+.sp-auth-icon-btn {
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  border: 1px solid rgba(244, 114, 182, 0.24);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff1f2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+}
+
+.sp-auth-icon-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(244, 114, 182, 0.36);
+  transform: translateY(-1px);
+}
+
+.sp-auth-icon-btn--header {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
 }
 
 .sp-auth-run {
@@ -1710,18 +1870,21 @@
 }
 
 .sp-auth-theme-toggle {
-  flex-shrink: 0;
-  min-width: 132px;
-  height: 38px;
+  width: 100%;
+  height: 40px;
   padding: 0 14px;
   border: 1px solid rgba(244, 114, 182, 0.24);
   border-radius: 12px;
   background: rgba(255, 255, 255, 0.08);
   color: #fff1f2;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 800;
   cursor: pointer;
   transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease, transform 0.2s ease;
+}
+
+.sp-auth-theme-toggle--full {
+  margin-bottom: 12px;
 }
 
 .sp-auth-theme-toggle:hover {
@@ -1873,6 +2036,7 @@
   background: linear-gradient(135deg, rgba(16, 185, 129, 0.24) 0%, rgba(34, 197, 94, 0.2) 100%);
   border-color: rgba(74, 222, 128, 0.38);
   color: #ecfdf5;
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.14), 0 10px 22px rgba(2, 6, 23, 0.18);
 }
 
 .sp-order-view {
@@ -1944,9 +2108,9 @@
 
 .sp-order-metrics {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-  gap: 10px;
-  margin-bottom: 12px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
 }
 
 .sp-order-search-grid {
@@ -1956,16 +2120,16 @@
 }
 
 .sp-order-metric {
-  padding: 12px;
-  border: 1px solid rgba(52, 211, 153, 0.16);
-  border-radius: 14px;
+  padding: 9px 10px;
+  border: 1px solid rgba(52, 211, 153, 0.14);
+  border-radius: 12px;
   background: rgba(255, 255, 255, 0.05);
 }
 
 .sp-order-metric span {
   display: block;
-  margin-bottom: 6px;
-  font-size: 11px;
+  margin-bottom: 4px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -1974,15 +2138,15 @@
 
 .sp-order-metric strong {
   display: block;
-  font-size: 24px;
+  font-size: 20px;
   line-height: 1;
   color: #f0fdf4;
 }
 
 .sp-order-metric small {
   display: block;
-  margin-top: 6px;
-  font-size: 11px;
+  margin-top: 4px;
+  font-size: 10px;
   color: rgba(229, 247, 239, 0.72);
 }
 
@@ -2340,15 +2504,15 @@
 
 #sp-topbar.sp-theme-light #sp-btn-clip {
   color: #4338ca;
-  border-color: rgba(99, 102, 241, 0.28);
-  background: rgba(224, 231, 255, 0.96);
+  border-color: rgba(99, 102, 241, 0.3);
+  background: rgba(238, 242, 255, 0.98);
 }
 
 #sp-topbar.sp-theme-light #sp-btn-clip:hover,
 #sp-topbar.sp-theme-light #sp-btn-clip.sp-active {
   color: #312e81;
-  border-color: rgba(99, 102, 241, 0.42);
-  background: linear-gradient(180deg, rgba(224, 231, 255, 0.98) 0%, rgba(199, 210, 254, 0.96) 100%);
+  border-color: rgba(99, 102, 241, 0.46);
+  background: linear-gradient(180deg, rgba(224, 231, 255, 0.98) 0%, rgba(199, 210, 254, 0.98) 100%);
   box-shadow: 0 10px 24px rgba(99, 102, 241, 0.2);
 }
 
@@ -2380,35 +2544,57 @@
   box-shadow: 0 10px 24px rgba(16, 185, 129, 0.18);
 }
 
+#sp-topbar.sp-theme-light #sp-btn-history {
+  color: #166534;
+  border-color: rgba(34, 197, 94, 0.34);
+  background: rgba(220, 252, 231, 0.98);
+}
+
+#sp-topbar.sp-theme-light #sp-btn-history:hover,
+#sp-topbar.sp-theme-light #sp-btn-history.sp-active,
+#sp-topbar.sp-theme-light #sp-btn-history[data-loading="true"] {
+  color: #14532d;
+  border-color: rgba(34, 197, 94, 0.48);
+  background: linear-gradient(180deg, rgba(220, 252, 231, 0.98) 0%, rgba(187, 247, 208, 0.96) 100%);
+  box-shadow: 0 10px 24px rgba(34, 197, 94, 0.18);
+}
+
 #sp-topbar.sp-theme-light #sp-btn-gestor {
-  color: #5b21b6;
-  border-color: rgba(139, 92, 246, 0.3);
-  background: rgba(237, 233, 254, 0.98);
+  color: #6d28d9;
+  border-color: rgba(139, 92, 246, 0.32);
+  background: rgba(245, 243, 255, 0.98);
 }
 
 #sp-topbar.sp-theme-light #sp-btn-gestor:hover,
 #sp-topbar.sp-theme-light #sp-btn-gestor.sp-active {
   color: #4c1d95;
-  border-color: rgba(139, 92, 246, 0.42);
-  background: linear-gradient(180deg, rgba(237, 233, 254, 0.98) 0%, rgba(221, 214, 254, 0.96) 100%);
-  box-shadow: 0 10px 24px rgba(139, 92, 246, 0.18);
+  border-color: rgba(139, 92, 246, 0.5);
+  background: linear-gradient(180deg, rgba(243, 232, 255, 0.98) 0%, rgba(233, 213, 255, 0.98) 100%);
+  box-shadow: 0 10px 24px rgba(139, 92, 246, 0.2);
 }
 
 #sp-topbar.sp-theme-light #sp-btn-auth {
-  color: #be185d;
-  border-color: rgba(236, 72, 153, 0.32);
-  background: rgba(252, 231, 243, 0.98);
+  color: #475569;
+  border-color: transparent;
+  background: transparent;
 }
 
-#sp-topbar.sp-theme-light #sp-btn-auth:hover,
+#sp-topbar.sp-theme-light #sp-btn-auth:hover {
+  color: #0f172a;
+  border-color: rgba(148, 163, 184, 0.24);
+  background: rgba(241, 245, 249, 0.9);
+  box-shadow: 0 8px 18px rgba(148, 163, 184, 0.12);
+}
+
 #sp-topbar.sp-theme-light #sp-btn-auth.sp-active {
-  color: #9d174d;
-  border-color: rgba(236, 72, 153, 0.46);
-  background: linear-gradient(180deg, rgba(252, 231, 243, 0.98) 0%, rgba(251, 207, 232, 0.96) 100%);
-  box-shadow: 0 10px 24px rgba(236, 72, 153, 0.2);
+  color: #0f172a;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
 }
 
 #sp-topbar.sp-theme-light .sp-counter-badge,
+#sp-topbar.sp-theme-light .sp-history-badge,
 #sp-topbar.sp-theme-light .sp-gestor-badge,
 #sp-topbar.sp-theme-light .sp-auth-badge {
   border-color: #ffffff;
@@ -2460,6 +2646,8 @@
 #sp-gestor-panel.sp-theme-light .sp-gestor-tab.is-active {
   background: linear-gradient(135deg, rgba(99, 102, 241, 0.16) 0%, rgba(59, 130, 246, 0.12) 100%);
   color: #1e1b4b;
+  border: 1px solid rgba(99, 102, 241, 0.28);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.12), 0 10px 20px rgba(99, 102, 241, 0.12);
 }
 
 #sp-gestor-panel.sp-theme-light .sp-gestor-form,
@@ -2525,6 +2713,22 @@
   background: #ffffff;
   border-color: rgba(148, 163, 184, 0.34);
   color: #0f172a;
+}
+
+#sp-auth-panel.sp-theme-light .sp-auth-icon-btn {
+  background: rgba(255, 255, 255, 0.92);
+  border-color: rgba(148, 163, 184, 0.28);
+  color: #475569;
+}
+
+#sp-auth-panel.sp-theme-light .sp-auth-icon-btn:hover {
+  background: #ffffff;
+  border-color: rgba(99, 102, 241, 0.28);
+  color: #312e81;
+}
+
+#sp-auth-panel.sp-theme-light .sp-auth-icon-btn--header {
+  border-color: rgba(148, 163, 184, 0.24);
 }
 
 #sp-gestor-panel.sp-theme-light .sp-gestor-field input::placeholder,
@@ -2599,6 +2803,7 @@
   background: linear-gradient(135deg, rgba(5, 150, 105, 0.12) 0%, rgba(34, 197, 94, 0.14) 100%);
   border-color: rgba(34, 197, 94, 0.26);
   color: #166534;
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.12), 0 10px 20px rgba(34, 197, 94, 0.12);
 }
 
 #sp-order-panel.sp-theme-light .sp-order-metric,
@@ -2728,6 +2933,7 @@
 #sp-gestor-batch-overlay.sp-theme-light .sp-gestor-batch-item.is-selected {
   border-color: rgba(99, 102, 241, 0.34);
   background: rgba(99, 102, 241, 0.12);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.12), 0 10px 20px rgba(99, 102, 241, 0.1);
 }
 
 #sp-gestor-batch-overlay.sp-theme-light .sp-gestor-batch-item.is-selected .sp-gestor-batch-item__check {
