@@ -33,6 +33,7 @@ let gestorEmailSettings = { emailTo: '', emailCC: '' };
 let gestorEmailSentIds = new Set();
 let gestorCopiedIds = new Set();
 let gestorArchivedIds = new Set();
+let gestorLegacyArchivedIds = new Set();
 let gestorFefrelloSentIds = new Set();
 let gestorExpandedCardId = null;
 let gestorPanelSavedPos = null;
@@ -556,10 +557,22 @@ function getGestorPendenciaById(id) {
   return gestorPendencias.find((item) => String(item.id) === String(id)) || null;
 }
 
+function isGestorPendenciaArchived(item) {
+  return Boolean(item?.is_archived || item?.archived_at);
+}
+
+function syncGestorArchivedIdsFromPendencias() {
+  gestorArchivedIds = new Set(
+    gestorPendencias
+      .filter((item) => isGestorPendenciaArchived(item))
+      .map((item) => String(item.id))
+  );
+}
+
 function getGestorVisiblePendencias(tab = gestorCurrentTab) {
   const items = tab === 'historico'
-    ? gestorPendencias.filter((item) => gestorArchivedIds.has(String(item.id)))
-    : gestorPendencias.filter((item) => !gestorArchivedIds.has(String(item.id)));
+    ? gestorPendencias.filter((item) => isGestorPendenciaArchived(item))
+    : gestorPendencias.filter((item) => !isGestorPendenciaArchived(item));
 
   const filter = String(gestorHistoryFilter || '').trim().toLowerCase();
   if (tab !== 'historico' || !filter) return items;
@@ -582,7 +595,7 @@ function getGestorActiveCount() {
 }
 
 function getGestorArchivedCount() {
-  return gestorPendencias.filter((item) => gestorArchivedIds.has(String(item.id))).length;
+  return gestorPendencias.filter((item) => isGestorPendenciaArchived(item)).length;
 }
 
 function normalizeGestorEmailSettings(settings) {
@@ -925,6 +938,7 @@ async function loadGestorCardStatus() {
     gestorEmailSentIds = new Set();
     gestorCopiedIds = new Set();
     gestorArchivedIds = new Set();
+    gestorLegacyArchivedIds = new Set();
     gestorFefrelloSentIds = new Set();
     return;
   }
@@ -951,7 +965,8 @@ async function loadGestorCardStatus() {
 
   gestorEmailSentIds = new Set(selected.emailSentIds);
   gestorCopiedIds = new Set(selected.copiedIds);
-  gestorArchivedIds = new Set(selected.archivedIds);
+  gestorArchivedIds = new Set();
+  gestorLegacyArchivedIds = new Set(selected.archivedIds);
   gestorFefrelloSentIds = new Set(selected.fefrelloSentIds);
 }
 
@@ -962,7 +977,7 @@ async function saveGestorCardStatus() {
   const nextStatus = {
     emailSentIds: [...gestorEmailSentIds],
     copiedIds: [...gestorCopiedIds],
-    archivedIds: [...gestorArchivedIds],
+    archivedIds: [...gestorLegacyArchivedIds],
     fefrelloSentIds: [...gestorFefrelloSentIds]
   };
 
@@ -986,11 +1001,52 @@ async function loadGestorLocalState() {
     gestorEmailSentIds = new Set();
     gestorCopiedIds = new Set();
     gestorArchivedIds = new Set();
+    gestorLegacyArchivedIds = new Set();
     gestorFefrelloSentIds = new Set();
     return;
   }
   gestorEmailSettings = await loadGestorEmailSettings();
   await loadGestorCardStatus();
+}
+
+async function migrateLegacyGestorArchivedIds(rows) {
+  if (!hasAuthSession() || !gestorLegacyArchivedIds.size || !Array.isArray(rows) || !rows.length) {
+    return rows;
+  }
+
+  const pending = rows.filter((item) => (
+    gestorLegacyArchivedIds.has(String(item.id)) && !isGestorPendenciaArchived(item)
+  ));
+
+  if (!pending.length) {
+    gestorLegacyArchivedIds.clear();
+    await saveGestorCardStatus();
+    return rows;
+  }
+
+  const archivedAt = new Date().toISOString();
+
+  try {
+    await Promise.all(
+      pending.map((item) => updateGestorPendencia(item.id, {
+        is_archived: true,
+        archived_at: archivedAt
+      }))
+    );
+
+    const migratedIds = new Set(pending.map((item) => String(item.id)));
+    gestorLegacyArchivedIds.clear();
+    await saveGestorCardStatus();
+
+    return rows.map((item) => (
+      migratedIds.has(String(item.id))
+        ? { ...item, is_archived: true, archived_at: archivedAt, updated_at: archivedAt }
+        : item
+    ));
+  } catch (error) {
+    console.warn('[Sentinela Pro] Falha ao migrar arquivos locais do Gestor para o banco:', error);
+    return rows;
+  }
 }
 
 function gestorCardToEmailHtml(p) {
@@ -1100,7 +1156,9 @@ async function loadGestorPendencias() {
   renderGestorPanelContent(document.getElementById('sp-gestor-panel'));
   try {
     const rows = await sbFetch(`/rest/v1/pendencias?user_id=eq.${auth.user.id}&order=created_at.desc&select=*`);
-    gestorPendencias = Array.isArray(rows) ? rows : [];
+    const normalizedRows = Array.isArray(rows) ? rows : [];
+    gestorPendencias = await migrateLegacyGestorArchivedIds(normalizedRows);
+    syncGestorArchivedIdsFromPendencias();
   } finally {
     gestorLoading = false;
     syncGestorButton();
@@ -1223,7 +1281,7 @@ function createTopBar() {
     <div class="sp-sep"></div>
     <button id="sp-btn-clip"    class="sp-btn" title="Capturar Dados (Alt+C)">${iconClip}</button>
     <div class="sp-sep"></div>
-    <button id="sp-btn-counter" class="sp-btn" title="Abas ML abertas - clique para recarregar (Alt+R)">
+    <button id="sp-btn-counter" class="sp-btn" title="Abas ML de pedidos e mensagens abertas - clique para recarregar (Alt+R)">
       ${iconCounter}
       <span class="sp-counter-badge" id="sp-counter-badge"></span>
     </button>
@@ -1494,8 +1552,8 @@ function updateCounterBadge(count) {
   badge.textContent = count > 0 ? count : '';
   badge.dataset.count = count;
   if (btn) btn.title = count > 0
-    ? `${count} aba${count !== 1 ? 's' : ''} ML abertas — clique para recarregar todas`
-    : 'Nenhuma aba ML com "Detalhe" ou "Mensagens"';
+    ? `${count} aba${count !== 1 ? 's' : ''} ML de pedidos ou mensagens aberta${count !== 1 ? 's' : ''} — clique para recarregar todas`
+    : 'Nenhuma aba ML com URL de pedido ou mensagens aberta';
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -1987,7 +2045,7 @@ function renderGestorCards(tab = gestorCurrentTab) {
   }
 
   return items.map((p) => `
-    <article class="sp-gestor-card${gestorArchivedIds.has(String(p.id)) ? ' is-archived' : ''}${gestorExpandedCardId === String(p.id) ? ' is-expanded' : ''}" data-id="${escapeGestorValue(p.id)}">
+    <article class="sp-gestor-card${isGestorPendenciaArchived(p) ? ' is-archived' : ''}${gestorExpandedCardId === String(p.id) ? ' is-expanded' : ''}" data-id="${escapeGestorValue(p.id)}">
       <div class="sp-gestor-card__summary" data-action="toggle-card" data-id="${escapeGestorValue(p.id)}">
         <div class="sp-gestor-card__top">
           <div class="sp-gestor-card__identity">
@@ -2000,9 +2058,9 @@ function renderGestorCards(tab = gestorCurrentTab) {
               ${renderGestorIconButton({
                 action: 'archive',
                 id: p.id,
-                title: gestorArchivedIds.has(String(p.id)) ? 'Retornar' : 'Arquivar',
-                iconType: gestorArchivedIds.has(String(p.id)) ? 'return' : 'archive',
-                active: gestorArchivedIds.has(String(p.id)),
+                title: isGestorPendenciaArchived(p) ? 'Retornar' : 'Arquivar',
+                iconType: isGestorPendenciaArchived(p) ? 'return' : 'archive',
+                active: isGestorPendenciaArchived(p),
                 tone: 'archive'
               })}
               ${renderGestorIconButton({
@@ -2815,17 +2873,30 @@ async function onGestorToggleArchive(event) {
   const id = event.currentTarget?.dataset?.id;
   if (!id) return;
   if (gestorArchivedIds.has(String(id))) {
-    gestorArchivedIds.delete(String(id));
+    const updatedAt = new Date().toISOString();
+    await updateGestorPendencia(id, { is_archived: false, archived_at: null });
+    gestorPendencias = gestorPendencias.map((item) => (
+      String(item.id) === String(id)
+        ? { ...item, is_archived: false, archived_at: null, updated_at: updatedAt }
+        : item
+    ));
+    syncGestorArchivedIdsFromPendencias();
     gestorCurrentTab = 'pendencias';
     if (gestorExpandedCardId === String(id)) gestorExpandedCardId = null;
-    await saveGestorCardStatus();
+    syncGestorButton();
     renderGestorPanelContent(createGestorPanel());
     setGestorStatus('Pendência retornou para a tela principal.', 'success');
     return;
   }
-  gestorArchivedIds.add(String(id));
+  const archivedAt = new Date().toISOString();
+  await updateGestorPendencia(id, { is_archived: true, archived_at: archivedAt });
+  gestorPendencias = gestorPendencias.map((item) => (
+    String(item.id) === String(id)
+      ? { ...item, is_archived: true, archived_at: archivedAt, updated_at: archivedAt }
+      : item
+  ));
+  syncGestorArchivedIdsFromPendencias();
   if (gestorExpandedCardId === String(id)) gestorExpandedCardId = null;
-  await saveGestorCardStatus();
   syncGestorButton();
   renderGestorPanelContent(createGestorPanel());
   setGestorStatus('Pendência arquivada no histórico.', 'success');
@@ -2841,7 +2912,6 @@ async function onGestorDelete(event) {
   setGestorStatus('Excluindo pendência...', 'info');
   try {
     await deleteGestorPendencia(id);
-    gestorArchivedIds.delete(String(id));
     gestorEmailSentIds.delete(String(id));
     gestorCopiedIds.delete(String(id));
     gestorFefrelloSentIds.delete(String(id));
@@ -3058,24 +3128,36 @@ async function onGestorToggleArchiveAction(event) {
   const id = event.currentTarget?.dataset?.id;
   if (!id) return;
   if (gestorArchivedIds.has(String(id))) {
-    gestorArchivedIds.delete(String(id));
+    const updatedAt = new Date().toISOString();
+    await updateGestorPendencia(id, { is_archived: false, archived_at: null });
+    gestorPendencias = gestorPendencias.map((item) => (
+      String(item.id) === String(id)
+        ? { ...item, is_archived: false, archived_at: null, updated_at: updatedAt }
+        : item
+    ));
+    syncGestorArchivedIdsFromPendencias();
     if (gestorExpandedCardId === String(id)) gestorExpandedCardId = null;
-    await saveGestorCardStatus();
     syncGestorButton();
     renderGestorPanelContent(createGestorPanel());
     setGestorStatus('Pendência retornou para a lista principal.', 'success');
     return;
   }
-  gestorArchivedIds.add(String(id));
+  const archivedAt = new Date().toISOString();
+  await updateGestorPendencia(id, { is_archived: true, archived_at: archivedAt });
+  gestorPendencias = gestorPendencias.map((item) => (
+    String(item.id) === String(id)
+      ? { ...item, is_archived: true, archived_at: archivedAt, updated_at: archivedAt }
+      : item
+  ));
+  syncGestorArchivedIdsFromPendencias();
   if (gestorExpandedCardId === String(id)) gestorExpandedCardId = null;
-  await saveGestorCardStatus();
   syncGestorButton();
   renderGestorPanelContent(createGestorPanel());
   setGestorStatus('Pendência arquivada.', 'success');
 }
 
 async function onGestorClearArchivedAction() {
-  const historico = gestorPendencias.filter((item) => gestorArchivedIds.has(String(item.id)));
+  const historico = gestorPendencias.filter((item) => isGestorPendenciaArchived(item));
   if (!historico.length) {
     setGestorStatus('Não há pendências arquivadas para limpar.', 'error');
     return;
@@ -6178,6 +6260,7 @@ document.addEventListener('sp:auth-changed', async () => {
       gestorEmailSentIds = new Set();
       gestorCopiedIds = new Set();
       gestorArchivedIds = new Set();
+      gestorLegacyArchivedIds = new Set();
       gestorFefrelloSentIds = new Set();
       hubProfilesCache = {};
       hubProfilesLoaded = false;

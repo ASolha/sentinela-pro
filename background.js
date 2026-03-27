@@ -337,34 +337,35 @@ chrome.notifications.onClicked.addListener(notificationId => {
 
 const ML_URLS = ['*://*.mercadolivre.com.br/*', '*://*.mercadolibre.com/*'];
 
+function isRelevantMercadoLivreTab(urlString) {
+  if (!urlString) return false;
+
+  try {
+    const url = new URL(urlString);
+    const isMLHost = (
+      url.hostname.includes('mercadolivre.com.br') ||
+      url.hostname.includes('mercadolibre.com')
+    );
+    if (!isMLHost) return false;
+
+    const pathname = url.pathname.replace(/\/+$/, '');
+    return (
+      /^\/vendas\/\d+\/detalhe$/i.test(pathname) ||
+      /^\/vendas\/novo\/mensagens\/\d+$/i.test(pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function countRelevantTabs() {
   const tabs = await chrome.tabs.query({});
-  return tabs.filter(tab => {
-    const isML = tab.url && (
-      tab.url.includes('mercadolivre.com.br') ||
-      tab.url.includes('mercadolibre.com')
-    );
-    const hasTitle = tab.title && (
-      tab.title.includes('Detalhe') ||
-      tab.title.includes('Mensagens')
-    );
-    return isML && hasTitle;
-  }).length;
+  return tabs.filter((tab) => isRelevantMercadoLivreTab(tab.url)).length;
 }
 
 async function refreshAllMLTabs() {
   const tabs = await chrome.tabs.query({});
-  const relevant = tabs.filter(tab => {
-    const isML = tab.url && (
-      tab.url.includes('mercadolivre.com.br') ||
-      tab.url.includes('mercadolibre.com')
-    );
-    const hasTitle = tab.title && (
-      tab.title.includes('Detalhe') ||
-      tab.title.includes('Mensagens')
-    );
-    return isML && hasTitle;
-  });
+  const relevant = tabs.filter((tab) => isRelevantMercadoLivreTab(tab.url));
   await Promise.all(relevant.map(tab => chrome.tabs.reload(tab.id).catch(() => {})));
   return relevant.length;
 }
