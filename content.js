@@ -4738,7 +4738,7 @@ function parseCustomerHistorySearchResults(html, targetLogin = '') {
 }
 
 function buildCustomerHistorySearchUrl(login) {
-  return `${window.location.origin}/vendas/omni/lista?filters=&subFilters=&search=${encodeURIComponent(login)}&limit=50&offset=0`;
+  return `${window.location.origin}/vendas/omni/lista?filters=&subFilters=&search=${encodeURIComponent(login)}&limit=50&offset=0&startPeriod=WITH_DATE_CLOSED_6M_OLD`;
 }
 
 function performCustomerHistoryLookup(login) {
@@ -5111,11 +5111,16 @@ function applyCustomerHistoryLookupResult(message) {
   }
 
   if (currentIndex < 0) {
+    // Pedido atual não encontrado na lista (pode ser muito recente/latência ML).
+    // Todos os resultados do cliente são anteriores ao atual — exibir excluindo o sale atual.
+    const previousOrders = normalizedResults.filter(
+      (entry) => !currentSaleCandidates.has(entry.saleNumber)
+    );
     const loadedState = saveCustomerHistoryState({
       status: 'loaded',
       error: '',
       results: normalizedResults,
-      previousOrders: [],
+      previousOrders,
       updatedAt: Date.now()
     });
 
@@ -5125,7 +5130,7 @@ function applyCustomerHistoryLookupResult(message) {
 
     syncCustomerHistoryPersistentNotification(loadedState);
     syncCustomerHistoryButton();
-    return loadedState;
+    return maybeAnnounceCustomerHistory(loadedState);
   }
 
   const sortDirection = getCustomerHistorySortDirection(normalizedResults);

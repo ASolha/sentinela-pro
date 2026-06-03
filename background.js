@@ -170,7 +170,7 @@ function sendCustomerHistoryLookupResult(tabId, payload) {
 
 function enqueueCustomerHistoryLookup(tabId, login, saleNumber, requestId) {
   const cachedResults = getCustomerHistoryCache(login);
-  if (cachedResults) {
+  if (cachedResults && cachedResults.length > 0) {
     sendCustomerHistoryLookupResult(tabId, {
       login,
       saleNumber,
