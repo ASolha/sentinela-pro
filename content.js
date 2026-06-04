@@ -8,6 +8,7 @@
 // ══════════════════════════════════════════════════════════════
 
 const PEGADOR_STORAGE_KEY = 'pegadorLastQuantity';
+const PEGADOR_MODO_MENSAGEM_KEY = 'pegadorModoMensagem';
 const ORDER_PICKER_TABLE = 'order_picker_history';
 const HUB_PROFILE_TABLE = 'hub_user_profiles';
 const HUB_SESSION_KEY = 'sp_hub_session';
@@ -4048,6 +4049,11 @@ function createOrderPickerPanel() {
         <span>Quantidade de pedidos</span>
         <input id="sp-order-quantity" type="number" min="1" step="1" value="1" />
       </label>
+      <label class="sp-order-modo-mensagem">
+        <input type="checkbox" id="sp-order-modo-mensagem" />
+        <span class="sp-order-modo-mensagem__track"></span>
+        <span class="sp-order-modo-mensagem__label">Modo Mensagem</span>
+      </label>
       <button type="button" id="sp-order-run" class="sp-order-run">Selecionar e abrir</button>
       <p id="sp-order-status" class="sp-order-status" data-tone="info"></p>
     </div>
@@ -4085,7 +4091,15 @@ function createOrderPickerPanel() {
   const refreshButton = panel.querySelector('#sp-order-refresh');
   const clearButton = panel.querySelector('#sp-order-clear');
   const historyList = panel.querySelector('#sp-order-history-list');
+  const modoMensagemToggle = panel.querySelector('#sp-order-modo-mensagem');
   let searchRefreshTimeout = null;
+
+  chrome.storage.local.get({ [PEGADOR_MODO_MENSAGEM_KEY]: false }, (result) => {
+    modoMensagemToggle.checked = result[PEGADOR_MODO_MENSAGEM_KEY];
+  });
+  modoMensagemToggle.addEventListener('change', () => {
+    chrome.storage.local.set({ [PEGADOR_MODO_MENSAGEM_KEY]: modoMensagemToggle.checked });
+  });
 
   loadOrderPickerQuantity(quantityInput);
   renderOrderPickerSessionState(panel);
@@ -4246,9 +4260,11 @@ async function runOrderPicker() {
   const panel = createOrderPickerPanel();
   const quantityInput = panel.querySelector('#sp-order-quantity');
   const runButton = panel.querySelector('#sp-order-run');
+  const modoMensagemToggle = panel.querySelector('#sp-order-modo-mensagem');
   const requestedQuantity = Number(quantityInput?.value);
+  const isModoMensagem = modoMensagemToggle?.checked ?? false;
 
-  if (!hasAuthSession()) {
+  if (!isModoMensagem && !hasAuthSession()) {
     setOrderPickerStatus('Faça login no Hub para registrar os pedidos no painel.', 'error');
     openAuthPanel();
     return;
@@ -4288,9 +4304,11 @@ async function runOrderPicker() {
       throw new Error(openResult?.error || 'Falha ao abrir os pedidos.');
     }
 
-    await saveOrderPickerHistoryEntries(result.selectedOrders);
-    await rememberOrderPickerOpenedEntries(result.selectedOrders);
-    renderOrderPickerDashboard(panel);
+    if (!isModoMensagem) {
+      await saveOrderPickerHistoryEntries(result.selectedOrders);
+      await rememberOrderPickerOpenedEntries(result.selectedOrders);
+      renderOrderPickerDashboard(panel);
+    }
 
     const processedOrders = result.selectedOrders.map((order) => order.numeroVenda).join(', ');
     const processedLogins = [...new Set(result.selectedOrders.map((order) => order.loginCliente).filter(Boolean))].slice(0, 5).join(', ');

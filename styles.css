@@ -2089,6 +2089,64 @@
   cursor: wait;
 }
 
+.sp-order-modo-mensagem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.sp-order-modo-mensagem input[type="checkbox"] {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.sp-order-modo-mensagem__track {
+  position: relative;
+  flex-shrink: 0;
+  width: 36px;
+  height: 20px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 10px;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.sp-order-modo-mensagem__track::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background: rgba(255, 255, 255, 0.5);
+  border-radius: 50%;
+  transition: transform 0.2s, background 0.2s;
+}
+
+.sp-order-modo-mensagem input:checked ~ .sp-order-modo-mensagem__track {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.4) 0%, rgba(34, 197, 94, 0.35) 100%);
+  border-color: rgba(74, 222, 128, 0.5);
+}
+
+.sp-order-modo-mensagem input:checked ~ .sp-order-modo-mensagem__track::after {
+  transform: translateX(16px);
+  background: #4ade80;
+}
+
+.sp-order-modo-mensagem__label {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.sp-order-modo-mensagem input:checked ~ .sp-order-modo-mensagem__label {
+  color: #4ade80;
+}
+
 .sp-order-status {
   min-height: 48px;
   margin: 12px 0 0;
@@ -2791,6 +2849,32 @@
 #sp-order-panel.sp-theme-light .sp-order-run {
   background: linear-gradient(135deg, #059669 0%, #16a34a 100%);
   color: #ffffff;
+}
+
+#sp-order-panel.sp-theme-light .sp-order-modo-mensagem__track {
+  background: rgba(15, 23, 42, 0.08);
+  border-color: rgba(15, 23, 42, 0.2);
+}
+
+#sp-order-panel.sp-theme-light .sp-order-modo-mensagem__track::after {
+  background: rgba(15, 23, 42, 0.35);
+}
+
+#sp-order-panel.sp-theme-light .sp-order-modo-mensagem input:checked ~ .sp-order-modo-mensagem__track {
+  background: linear-gradient(135deg, rgba(5, 150, 105, 0.2) 0%, rgba(34, 197, 94, 0.22) 100%);
+  border-color: rgba(5, 150, 105, 0.4);
+}
+
+#sp-order-panel.sp-theme-light .sp-order-modo-mensagem input:checked ~ .sp-order-modo-mensagem__track::after {
+  background: #059669;
+}
+
+#sp-order-panel.sp-theme-light .sp-order-modo-mensagem__label {
+  color: #334155;
+}
+
+#sp-order-panel.sp-theme-light .sp-order-modo-mensagem input:checked ~ .sp-order-modo-mensagem__label {
+  color: #059669;
 }
 
 #sp-order-panel.sp-theme-light .sp-order-tab {
