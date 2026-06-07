@@ -37,12 +37,16 @@ async function initializeExtension() {
 }
 
 async function openOrderTabs(urls) {
+  let opened = 0;
   for (const url of urls) {
-    await chrome.tabs.create({
-      url,
-      active: false
-    });
+    try {
+      await chrome.tabs.create({ url, active: false });
+      opened++;
+    } catch {
+      // Continua nas demais URLs se uma falhar
+    }
   }
+  return opened;
 }
 
 // Mensagens do content script
@@ -51,7 +55,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const urls = Array.isArray(message.urls) ? message.urls : [];
 
     openOrderTabs(urls)
-      .then(() => sendResponse({ ok: true, opened: urls.length }))
+      .then((opened) => sendResponse({ ok: true, opened }))
       .catch((error) => {
         sendResponse({
           ok: false,
@@ -358,27 +362,31 @@ function isRelevantMercadoLivreTab(urlString) {
   }
 }
 
+function isTabRelevant(tab) {
+  return isRelevantMercadoLivreTab(tab.url) || isRelevantMercadoLivreTab(tab.pendingUrl);
+}
+
 async function countRelevantTabs() {
   const tabs = await chrome.tabs.query({});
-  return tabs.filter((tab) => isRelevantMercadoLivreTab(tab.url)).length;
+  return tabs.filter(isTabRelevant).length;
 }
 
 async function refreshAllMLTabs() {
   const tabs = await chrome.tabs.query({});
-  const relevant = tabs.filter((tab) => isRelevantMercadoLivreTab(tab.url));
+  const relevant = tabs.filter(isTabRelevant);
   await Promise.all(relevant.map(tab => chrome.tabs.reload(tab.id).catch(() => {})));
   return relevant.length;
 }
 
 async function updateBadgeAndNotify() {
-  const count = await countRelevantTabs();
+  // Uma única query para contar e transmitir — evita dessincronização entre dois awaits
+  const tabs = await chrome.tabs.query({});
+  const count = tabs.filter(isTabRelevant).length;
 
   chrome.action.setBadgeText({ text: '' });
   chrome.action.setTitle({ title: 'Sentinela Pro' });
 
-  // Broadcast para todos os content scripts ML para atualizar o botão na top bar
-  const mlTabs = await chrome.tabs.query({});
-  mlTabs.forEach(tab => {
+  tabs.forEach(tab => {
     if (tab.url && (tab.url.includes('mercadolivre.com.br') || tab.url.includes('mercadolibre.com'))) {
       chrome.tabs.sendMessage(tab.id, { action: 'tabCountUpdate', count }).catch(() => {});
     }
@@ -400,9 +408,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
+// Debounce para evitar múltiplas queries simultâneas quando várias abas mudam de estado ao mesmo tempo
+let badgeUpdateTimer = null;
+function scheduleBadgeUpdate() {
+  clearTimeout(badgeUpdateTimer);
+  badgeUpdateTimer = setTimeout(updateBadgeAndNotify, 150);
+}
+
 // Monitora mudanças de abas
-chrome.tabs.onCreated.addListener(updateBadgeAndNotify);
-chrome.tabs.onRemoved.addListener(updateBadgeAndNotify);
+chrome.tabs.onCreated.addListener(scheduleBadgeUpdate);
+chrome.tabs.onRemoved.addListener(scheduleBadgeUpdate);
 chrome.tabs.onRemoved.addListener((tabId) => {
   customerHistoryPending.forEach((entry, login) => {
     entry.requests.forEach((request, key) => {
@@ -417,9 +432,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   });
 });
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
-  if (changeInfo.title || changeInfo.status === 'complete') updateBadgeAndNotify();
+  if (changeInfo.status === 'complete' || changeInfo.pendingUrl) scheduleBadgeUpdate();
 });
-chrome.tabs.onActivated.addListener(updateBadgeAndNotify);
+chrome.tabs.onActivated.addListener(scheduleBadgeUpdate);
 
 // Atualiza via chrome.alarms (MV3-safe — não suspende como setInterval)
 chrome.alarms.create('badgeRefresh', { periodInMinutes: 0.1 }); // ~6 s

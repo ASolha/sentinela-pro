@@ -9,6 +9,17 @@
 
 const PEGADOR_STORAGE_KEY = 'pegadorLastQuantity';
 const PEGADOR_MODO_MENSAGEM_KEY = 'pegadorModoMensagem';
+
+// Cache síncrono do Modo Mensagem — atualizado via storage listener para evitar await no ciclo do observer
+let modoMensagemCache = false;
+chrome.storage.local.get({ [PEGADOR_MODO_MENSAGEM_KEY]: false }, (r) => {
+  modoMensagemCache = Boolean(r[PEGADOR_MODO_MENSAGEM_KEY]);
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && PEGADOR_MODO_MENSAGEM_KEY in changes) {
+    modoMensagemCache = Boolean(changes[PEGADOR_MODO_MENSAGEM_KEY].newValue);
+  }
+});
 const ORDER_PICKER_TABLE = 'order_picker_history';
 const HUB_PROFILE_TABLE = 'hub_user_profiles';
 const HUB_SESSION_KEY = 'sp_hub_session';
@@ -69,9 +80,24 @@ const GESTOR_FEFRELLO_API_BASE = 'https://southamerica-east1-fefrello.cloudfunct
 const GESTOR_FEFRELLO_API_KEY = '708a34771f2659594502ed4b74cd634819a297d37e3fb2fa3cafdf826c286f16';
 const GESTOR_FEFRELLO_CACHE_TTL = 24 * 60 * 60 * 1000;
 const GESTOR_FEFRELLO_RESPONSAVEIS = ['Solha', 'Ti', 'Vitao', 'Brunao', 'Fe'];
+let gestorEtiquetasConfig = [];
+let gestorEtiquetasEditingId = null;
+const GESTOR_LABELS = [
+  { key: 'urgente',      label: 'Urgente',       color: '#ef4444' },
+  { key: 'aguardando',   label: 'Aguardando',    color: '#f97316' },
+  { key: 'em_andamento', label: 'Em andamento',  color: '#eab308' },
+  { key: 'troca',        label: 'Troca/Dev.',    color: '#3b82f6' },
+  { key: 'pagamento',    label: 'Pagamento',     color: '#8b5cf6' },
+  { key: 'sem_contato',  label: 'Sem contato',   color: '#6b7280' },
+  { key: 'resolvido',    label: 'Resolvido',     color: '#22c55e' },
+];
 
 function hasAuthSession() {
   return Boolean(auth.user && auth.token);
+}
+
+function isOrderPickerAdmin() {
+  return auth.user?.email === 'alcsolha@gmail.com';
 }
 
 function saveSession(session) {
@@ -599,6 +625,130 @@ function getGestorArchivedCount() {
   return gestorPendencias.filter((item) => isGestorPendenciaArchived(item)).length;
 }
 
+function parseGestorEtiquetas(str) {
+  if (!str) return [];
+  try {
+    const parsed = JSON.parse(str);
+    if (Array.isArray(parsed)) return parsed.filter((k) => typeof k === 'string');
+  } catch (_) {}
+  return [];
+}
+
+async function loadGestorEtiquetasConfig() {
+  if (!hasAuthSession()) {
+    gestorEtiquetasConfig = GESTOR_LABELS.map((l, i) => ({ id: l.key, label: l.label, cor: l.color, ordem: i }));
+    return;
+  }
+  try {
+    const rows = await sbFetch(`/rest/v1/gestor_etiquetas?user_id=eq.${auth.user.id}&order=ordem.asc,created_at.asc&select=*`);
+    if (Array.isArray(rows) && rows.length > 0) {
+      gestorEtiquetasConfig = rows;
+    } else {
+      const toInsert = GESTOR_LABELS.map((l, i) => ({ user_id: auth.user.id, label: l.label, cor: l.color, ordem: i }));
+      const created = await sbFetch('/rest/v1/gestor_etiquetas', {
+        method: 'POST',
+        headers: { Prefer: 'return=representation' },
+        body: JSON.stringify(toInsert)
+      });
+      gestorEtiquetasConfig = Array.isArray(created) && created.length ? created : GESTOR_LABELS.map((l, i) => ({ id: l.key, label: l.label, cor: l.color, ordem: i }));
+    }
+  } catch (_) {
+    gestorEtiquetasConfig = GESTOR_LABELS.map((l, i) => ({ id: l.key, label: l.label, cor: l.color, ordem: i }));
+  }
+}
+
+async function createGestorEtiqueta(label, cor) {
+  const ordem = gestorEtiquetasConfig.length;
+  const rows = await sbFetch('/rest/v1/gestor_etiquetas', {
+    method: 'POST',
+    headers: { Prefer: 'return=representation' },
+    body: JSON.stringify({ user_id: auth.user.id, label, cor, ordem })
+  });
+  return rows?.[0] || null;
+}
+
+async function updateGestorEtiqueta(id, label, cor) {
+  await sbFetch(`/rest/v1/gestor_etiquetas?id=eq.${id}`, {
+    method: 'PATCH',
+    headers: { Prefer: 'return=minimal' },
+    body: JSON.stringify({ label, cor })
+  });
+}
+
+async function deleteGestorEtiqueta(id) {
+  await sbFetch(`/rest/v1/gestor_etiquetas?id=eq.${id}`, { method: 'DELETE' });
+}
+
+function renderGestorEtiquetasDisplay(etiquetasStr) {
+  const ids = parseGestorEtiquetas(etiquetasStr);
+  if (!ids.length) return '';
+  const chips = ids.map((id) => {
+    const def = gestorEtiquetasConfig.find((l) => String(l.id) === String(id));
+    if (!def) return '';
+    return `<span class="sp-gestor-label-strip" style="background:${def.cor}">${escapeGestorValue(def.label)}</span>`;
+  }).filter(Boolean).join('');
+  return chips ? `<div class="sp-gestor-label-row">${chips}</div>` : '';
+}
+
+function renderGestorLabelPicker(etiquetasStr) {
+  const selected = parseGestorEtiquetas(etiquetasStr);
+  if (!gestorEtiquetasConfig.length) return '';
+  const buttons = gestorEtiquetasConfig.map((def) => {
+    const isActive = selected.includes(String(def.id));
+    return `<button type="button" class="sp-gestor-label-btn${isActive ? ' is-active' : ''}" data-action="toggle-label" data-label-key="${escapeGestorValue(String(def.id))}" style="--lc:${def.cor}">${escapeGestorValue(def.label)}</button>`;
+  }).join('');
+  return `
+    <div class="sp-gestor-label-picker">
+      <span class="sp-gestor-label-picker__title">Etiquetas</span>
+      <div class="sp-gestor-label-picker__options">
+        <input type="hidden" data-gestor-field="etiquetas" value="${escapeGestorValue(etiquetasStr || '')}" />
+        ${buttons}
+      </div>
+    </div>
+  `;
+}
+
+function renderGestorEtiquetasEditor() {
+  const editingId = gestorEtiquetasEditingId;
+  const editing = editingId && editingId !== 'new' ? gestorEtiquetasConfig.find((l) => String(l.id) === editingId) : null;
+  const list = gestorEtiquetasConfig.map((def) => `
+    <div class="sp-gestor-etiqueta-row">
+      <span class="sp-gestor-etiqueta-preview" style="background:${def.cor}"></span>
+      <span class="sp-gestor-etiqueta-name">${escapeHtml(def.label)}</span>
+      <div class="sp-gestor-etiqueta-btns">
+        <button type="button" class="sp-gestor-action sp-gestor-action--xs" data-action="edit-etiqueta" data-id="${escapeHtml(String(def.id))}">Editar</button>
+        <button type="button" class="sp-gestor-action sp-gestor-action--xs sp-gestor-action--danger" data-action="delete-etiqueta" data-id="${escapeHtml(String(def.id))}">Excluir</button>
+      </div>
+    </div>
+  `).join('');
+  const showForm = editingId !== null;
+  return `
+    <div class="sp-gestor-settings__block">
+      <strong>Etiquetas</strong>
+      <p>Etiquetas para classificar e filtrar pendências visualmente.</p>
+    </div>
+    <div class="sp-gestor-etiquetas-list">${list || '<p class="sp-gestor-etiquetas-empty">Nenhuma etiqueta criada.</p>'}</div>
+    <button type="button" id="sp-gestor-etiqueta-new" class="sp-gestor-action" style="margin-bottom:10px">Nova etiqueta</button>
+    ${showForm ? `
+      <div class="sp-gestor-etiqueta-form">
+        <input type="hidden" id="sp-gestor-etiqueta-id" value="${escapeHtml(editingId === 'new' ? '' : String(editingId))}" />
+        <label class="sp-gestor-field">
+          <span>Nome</span>
+          <input id="sp-gestor-etiqueta-label" type="text" placeholder="Ex: Urgente" maxlength="32" value="${escapeHtml(editing?.label || '')}" />
+        </label>
+        <label class="sp-gestor-field sp-gestor-color-field">
+          <span>Cor</span>
+          <input id="sp-gestor-etiqueta-cor" type="color" value="${escapeHtml(editing?.cor || '#6b7280')}" />
+        </label>
+        <div class="sp-gestor-form__actions">
+          <button type="button" id="sp-gestor-etiqueta-cancel" class="sp-gestor-action">Cancelar</button>
+          <button type="button" id="sp-gestor-etiqueta-save" class="sp-gestor-action sp-gestor-action--primary">${editing ? 'Atualizar' : 'Criar'}</button>
+        </div>
+      </div>
+    ` : ''}
+  `;
+}
+
 function normalizeGestorEmailSettings(settings) {
   return {
     emailTo: (settings?.emailTo || DEFAULT_GESTOR_EMAIL_TO).trim(),
@@ -610,7 +760,7 @@ function buildGestorSingleEmailHtml(pendencia, date = new Date().toLocaleDateStr
   return `
     <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
       <h2 style="color:#222;border-bottom:3px solid #FFE600;padding-bottom:8px;">
-        Pendência - ${escapeGestorValue(pendencia.login_cliente) || 'Cliente'}
+        ${escapeGestorValue(pendencia.login_cliente) || 'Cliente'}
       </h2>
       <p style="color:#666;margin-bottom:16px;">Data: <strong>${date}</strong></p>
       ${gestorCardToRichHtml(pendencia)}
@@ -621,9 +771,9 @@ function buildGestorConsolidatedEmailHtml(items, date = new Date().toLocaleDateS
   return `
     <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
       <h2 style="color:#222;border-bottom:3px solid #FFE600;padding-bottom:8px;">
-        Pendências em Aberto - ${date}
+        Avisos e Pendentes - ${date}
       </h2>
-      <p style="color:#666;margin-bottom:16px;">Total: <strong>${items.length}</strong> pendência(s)</p>
+      <p style="color:#666;margin-bottom:16px;">Total: <strong>${items.length}</strong> aviso(s) e pendência(s)</p>
       ${items.map((item, index) =>
         `${index > 0 ? '<hr style="border:none;border-top:1px solid #eee;margin:12px 0;" />' : ''}${gestorCardToRichHtml(item)}`
       ).join('')}
@@ -1050,14 +1200,37 @@ async function migrateLegacyGestorArchivedIds(rows) {
   }
 }
 
+function buildGestorEtiquetasTableRow(etiquetasStr, cellLabel, cellValue) {
+  const ids = parseGestorEtiquetas(etiquetasStr);
+  if (!ids.length) return '';
+  const badges = ids.map((id) => {
+    const def = gestorEtiquetasConfig.find((l) => String(l.id) === String(id));
+    if (!def) return '';
+    return `<span style="display:inline-block;background:${def.cor};color:#fff;padding:2px 9px;border-radius:999px;font-size:11px;font-weight:700;margin-right:4px;">${escapeGestorValue(def.label)}</span>`;
+  }).filter(Boolean).join('');
+  return badges ? `<tr><td ${cellLabel}><b>Etiquetas:</b></td><td ${cellValue}>${badges}</td></tr>` : '';
+}
+
+function buildGestorEtiquetasEmailHtml(etiquetasStr) {
+  const ids = parseGestorEtiquetas(etiquetasStr);
+  if (!ids.length) return '';
+  const badges = ids.map((id) => {
+    const def = gestorEtiquetasConfig.find((l) => String(l.id) === String(id));
+    if (!def) return '';
+    return `<span style="display:inline-block;background:${def.cor};color:#fff;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:700;margin-right:4px;">${escapeGestorValue(def.label)}</span>`;
+  }).filter(Boolean).join('');
+  return badges ? `<div style="margin-bottom:10px;">${badges}</div>` : '';
+}
+
 function gestorCardToEmailHtml(p) {
   const cellLabel = 'style="padding:4px 8px;color:#64748b;width:38%;vertical-align:top"';
   const cellValue = 'style="padding:4px 8px;vertical-align:top;color:#111827"';
   return `
     <div style="font-family:Arial,sans-serif;border:1px solid #e5e7eb;border-radius:10px;padding:16px;max-width:560px;background:#ffffff;">
-      <h3 style="margin:0 0 10px;color:#111827;border-bottom:3px solid #facc15;padding-bottom:8px;font-size:15px;">
+      <h3 style="margin:0 0 8px;color:#111827;border-bottom:3px solid #facc15;padding-bottom:8px;font-size:15px;">
         ${escapeGestorValue(p.login_cliente) || '(sem login)'}
       </h3>
+      ${buildGestorEtiquetasEmailHtml(p.etiquetas)}
       <table style="width:100%;border-collapse:collapse;font-size:13px;">
         <tr><td ${cellLabel}><b>Nº da Venda:</b></td><td ${cellValue}>${escapeGestorValue(p.numero_venda) || '—'}</td></tr>
         <tr><td ${cellLabel}><b>Modelo:</b></td><td ${cellValue}>${escapeGestorValue(p.modelo) || '—'}</td></tr>
@@ -1085,10 +1258,11 @@ function gestorCardToRichHtml(p) {
     .join('');
   return `
     <div style="font-family:Arial,sans-serif;border:1px solid #e5e7eb;border-radius:10px;padding:16px;max-width:560px;background:#ffffff;">
-      <h3 style="margin:0 0 10px;color:#111827;border-bottom:3px solid #facc15;padding-bottom:8px;font-size:15px;">
+      <h3 style="margin:0 0 8px;color:#111827;border-bottom:3px solid #facc15;padding-bottom:8px;font-size:15px;">
         ${escapeGestorValue(p.login_cliente) || '(sem login)'}
       </h3>
       <table style="width:100%;border-collapse:collapse;font-size:13px;">
+        ${buildGestorEtiquetasTableRow(p.etiquetas, cellLabel, cellValue)}
         <tr><td ${cellLabel}><b>Venda:</b></td><td ${cellValue}>${escapeGestorValue(p.numero_venda) || '-'}</td></tr>
         <tr><td ${cellLabel}><b>Modelo:</b></td><td ${cellValue}>${escapeGestorValue(p.modelo) || '-'}</td></tr>
         ${aroRows}
@@ -1140,8 +1314,14 @@ async function sendGestorEmail(subject, html) {
   return res.json();
 }
 
-function buildGestorEmailSubject(loginCliente, date) {
-  return `${String(loginCliente || 'Cliente').trim() || 'Cliente'} - B.O. - ${date}`;
+function buildGestorEmailSubject(loginCliente, date, etiquetasStr) {
+  const login = String(loginCliente || 'Cliente').trim() || 'Cliente';
+  const ids = parseGestorEtiquetas(etiquetasStr);
+  const labels = ids
+    .map((id) => gestorEtiquetasConfig.find((l) => String(l.id) === String(id))?.label)
+    .filter(Boolean)
+    .join(', ');
+  return labels ? `${login} - ${labels} - ${date}` : `${login} - ${date}`;
 }
 
 async function loadGestorPendencias() {
@@ -1352,16 +1532,20 @@ function createTopBar() {
   });
 
   // Counter — recarrega todas as abas ML relevantes
-  btnCounter.addEventListener('click', () => {
+  btnCounter.addEventListener('click', async () => {
     if (btnCounter.dataset.refreshing === 'true') return;
     btnCounter.dataset.refreshing = 'true';
     animateCounterRefreshButton();
-    chrome.runtime.sendMessage({ action: 'refreshAllTabs' }, (r) => {
-      btnCounter.dataset.refreshing = 'false';
+    try {
+      const r = await chrome.runtime.sendMessage({ action: 'refreshAllTabs' });
       if (r?.success) {
         mostrarNotificacao(`${r.count} aba${r.count !== 1 ? 's' : ''} recarregada${r.count !== 1 ? 's' : ''}!`);
       }
-    });
+    } catch (error) {
+      console.warn('[Sentinela Pro] Falha ao recarregar abas:', error?.message);
+    } finally {
+      btnCounter.dataset.refreshing = 'false';
+    }
   });
 
   btnOrders?.addEventListener('click', () => {
@@ -1987,6 +2171,7 @@ function renderGestorBatchModal() {
             <span class="sp-gestor-batch-item__content">
               <strong>${escapeGestorValue(item.login_cliente || '(sem login)')}</strong>
               <span>${item.numero_venda ? `#${escapeGestorValue(item.numero_venda)}` : 'Sem venda'}${item.modelo ? ` • ${escapeGestorValue(item.modelo)}` : ''}</span>
+              ${renderGestorEtiquetasDisplay(item.etiquetas)}
             </span>
           </button>
         `;
@@ -2048,6 +2233,7 @@ function renderGestorCards(tab = gestorCurrentTab) {
   return items.map((p) => `
     <article class="sp-gestor-card${isGestorPendenciaArchived(p) ? ' is-archived' : ''}${gestorExpandedCardId === String(p.id) ? ' is-expanded' : ''}" data-id="${escapeGestorValue(p.id)}">
       <div class="sp-gestor-card__summary" data-action="toggle-card" data-id="${escapeGestorValue(p.id)}">
+        ${renderGestorEtiquetasDisplay(p.etiquetas)}
         <div class="sp-gestor-card__top">
           <div class="sp-gestor-card__identity">
             <strong>${escapeGestorValue(p.login_cliente || 'Pendência')}</strong>
@@ -2095,6 +2281,7 @@ function renderGestorCards(tab = gestorCurrentTab) {
         </div>
       </div>
       <div class="sp-gestor-card__body">
+        ${renderGestorLabelPicker(p.etiquetas)}
         <div class="sp-gestor-edit-grid">
           ${gestorFieldInput('login_cliente', 'Login', p.login_cliente, 'Apelido do comprador')}
           ${gestorFieldInput('modelo', 'Modelo', p.modelo, 'Descreva o modelo')}
@@ -2158,6 +2345,7 @@ function renderGestorPanelContent(panel) {
             <span>Observações</span>
             <textarea id="sp-gestor-obs" rows="4" placeholder="Detalhes da pendência"></textarea>
           </label>
+          ${renderGestorLabelPicker('')}
           <div class="sp-gestor-form__actions">
             <button type="button" id="sp-gestor-cancel" class="sp-gestor-action">Cancelar</button>
             <button type="button" id="sp-gestor-save-fefrello" class="sp-gestor-action sp-gestor-action--success">Fefrello</button>
@@ -2186,6 +2374,7 @@ function renderGestorPanelContent(panel) {
             <strong>Conta conectada</strong>
             <p>${escapeHtml(auth.user?.email || 'Sem conta conectada')}</p>
           </div>
+          ${renderGestorEtiquetasEditor()}
           <div class="sp-gestor-settings__block">
             <strong>Envio por Gmail</strong>
             <p>Defina destinatário e cópia. O token do Gmail será pedido no primeiro envio.</p>
@@ -2333,6 +2522,75 @@ function bindGestorPanelEvents(panel) {
   panel.querySelectorAll('[data-action="delete"]').forEach((button) => {
     button.addEventListener('click', onGestorDelete);
   });
+  panel.querySelectorAll('[data-action="toggle-label"]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const key = button.dataset.labelKey;
+      const options = button.closest('.sp-gestor-label-picker__options');
+      if (!options) return;
+      const input = options.querySelector('[data-gestor-field="etiquetas"]');
+      if (!input) return;
+      const current = parseGestorEtiquetas(input.value);
+      const next = current.includes(key) ? current.filter((k) => k !== key) : [...current, key];
+      input.value = JSON.stringify(next);
+      button.classList.toggle('is-active', next.includes(key));
+    });
+  });
+
+  panel.querySelector('#sp-gestor-etiqueta-new')?.addEventListener('click', () => {
+    gestorEtiquetasEditingId = 'new';
+    renderGestorPanelContent(panel);
+  });
+  panel.querySelector('#sp-gestor-etiqueta-cancel')?.addEventListener('click', () => {
+    gestorEtiquetasEditingId = null;
+    renderGestorPanelContent(panel);
+  });
+  panel.querySelector('#sp-gestor-etiqueta-save')?.addEventListener('click', async () => {
+    const labelInput = panel.querySelector('#sp-gestor-etiqueta-label');
+    const corInput = panel.querySelector('#sp-gestor-etiqueta-cor');
+    const idInput = panel.querySelector('#sp-gestor-etiqueta-id');
+    const label = labelInput?.value?.trim() || '';
+    const cor = corInput?.value || '#6b7280';
+    const id = idInput?.value || '';
+    if (!label) { setGestorStatus('Informe o nome da etiqueta.', 'error'); return; }
+    setGestorStatus('Salvando etiqueta...', 'info');
+    try {
+      if (id) {
+        await updateGestorEtiqueta(id, label, cor);
+      } else {
+        await createGestorEtiqueta(label, cor);
+      }
+      gestorEtiquetasEditingId = null;
+      await loadGestorEtiquetasConfig();
+      renderGestorPanelContent(panel);
+      setGestorStatus(id ? 'Etiqueta atualizada.' : 'Etiqueta criada.', 'success');
+    } catch (error) {
+      setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+    }
+  });
+  panel.querySelectorAll('[data-action="edit-etiqueta"]').forEach((button) => {
+    button.addEventListener('click', () => {
+      gestorEtiquetasEditingId = button.dataset.id;
+      renderGestorPanelContent(panel);
+    });
+  });
+  panel.querySelectorAll('[data-action="delete-etiqueta"]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const id = button.dataset.id;
+      if (!id) return;
+      setGestorStatus('Excluindo etiqueta...', 'info');
+      try {
+        await deleteGestorEtiqueta(id);
+        await loadGestorEtiquetasConfig();
+        gestorEtiquetasEditingId = null;
+        renderGestorPanelContent(panel);
+        setGestorStatus('Etiqueta excluída.', 'success');
+      } catch (error) {
+        setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
+      }
+    });
+  });
 
   if (gestorCurrentTab === 'ajustes') {
     loadGestorFefrelloSettings(panel);
@@ -2453,6 +2711,7 @@ async function openGestorPanel() {
   if (hasAuthSession()) {
     try {
       await loadGestorLocalState();
+      await loadGestorEtiquetasConfig();
       renderGestorPanelContent(panel);
       await loadGestorPendencias();
       fillGestorForm(panel);
@@ -2487,7 +2746,8 @@ function collectGestorCreateDraft(panel) {
       modelo: panel.querySelector('#sp-gestor-modelo')?.value?.trim() || '',
       url: panel.querySelector('#sp-gestor-url')?.value?.trim() || '',
       observacoes: panel.querySelector('#sp-gestor-obs')?.value?.trim() || '',
-      aro: buildGestorAroValue(collectGestorArosFromScope(form))
+      aro: buildGestorAroValue(collectGestorArosFromScope(form)),
+      etiquetas: form.querySelector('[data-gestor-field="etiquetas"]')?.value || ''
     }
   };
 }
@@ -2757,7 +3017,7 @@ async function onGestorSendEmail(event) {
   setGestorStatus('Enviando email...', 'info');
   try {
     const date = new Date().toLocaleDateString('pt-BR');
-    const subject = buildGestorEmailSubject(pendencia.login_cliente, date);
+    const subject = buildGestorEmailSubject(pendencia.login_cliente, date, pendencia.etiquetas);
     const body = `
       <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
         <h2 style="color:#222;border-bottom:3px solid #FFE600;padding-bottom:8px;">
@@ -2791,7 +3051,7 @@ async function onGestorSendConsolidated() {
 
   try {
     const date = new Date().toLocaleDateString('pt-BR');
-    const subject = `Pendentes - ${date}`;
+    const subject = `Avisos e Pendentes - ${date}`;
     const body = `
       <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
         <h2 style="color:#222;border-bottom:3px solid #FFE600;padding-bottom:8px;">
@@ -2837,7 +3097,7 @@ async function onGestorSendIndividualAll() {
   for (const item of selected) {
     try {
       const date = new Date().toLocaleDateString('pt-BR');
-      const subject = buildGestorEmailSubject(item.login_cliente, date);
+      const subject = buildGestorEmailSubject(item.login_cliente, date, item.etiquetas);
       const body = `
         <div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;">
           <h2 style="color:#222;border-bottom:3px solid #FFE600;padding-bottom:8px;">
@@ -2944,7 +3204,7 @@ async function onGestorSendEmailAction(event) {
   setGestorStatus('Enviando email...', 'info');
   try {
     const date = new Date().toLocaleDateString('pt-BR');
-    const subject = buildGestorEmailSubject(pendencia.login_cliente, date);
+    const subject = buildGestorEmailSubject(pendencia.login_cliente, date, pendencia.etiquetas);
     await sendGestorEmail(subject, buildGestorSingleEmailHtml(pendencia, date));
     gestorEmailSentIds.add(String(id));
     await saveGestorCardStatus();
@@ -3064,7 +3324,7 @@ async function onGestorSendConsolidatedAction() {
 
   try {
     const date = new Date().toLocaleDateString('pt-BR');
-    const subject = `Pendentes - ${date}`;
+    const subject = `Avisos e Pendentes - ${date}`;
     await sendGestorEmail(subject, buildGestorConsolidatedEmailHtml(selected, date));
     selected.forEach((item) => gestorEmailSentIds.add(String(item.id)));
     await saveGestorCardStatus();
@@ -3100,7 +3360,7 @@ async function onGestorSendIndividualAllAction() {
   for (const item of selected) {
     try {
       const date = new Date().toLocaleDateString('pt-BR');
-      const subject = buildGestorEmailSubject(item.login_cliente, date);
+      const subject = buildGestorEmailSubject(item.login_cliente, date, item.etiquetas);
       await sendGestorEmail(subject, buildGestorSingleEmailHtml(item, date));
       gestorEmailSentIds.add(String(item.id));
       success += 1;
@@ -3206,17 +3466,26 @@ function isOrderPickerSupportedPage() {
 
 function getOrderRowsForPicker() {
   return Array.from(document.querySelectorAll('.sc-row, .sc-row-marketplace'))
-    .filter((row) => row.querySelector('.left-column__pack-id[aria-label^="#"]'));
+    .filter((row) =>
+      row.querySelector('.left-column__pack-id[aria-label^="#"]') ||
+      row.querySelector('[aria-label^="#"]')
+    );
 }
 
 function getOrderIdFromPickerRow(row) {
-  const packNode = row.querySelector('.left-column__pack-id[aria-label^="#"]');
+  const packNode =
+    row.querySelector('.left-column__pack-id[aria-label^="#"]') ||
+    row.querySelector('[aria-label^="#"]') ||
+    row.querySelector('.left-column__pack-id');
   const rawValue = packNode?.getAttribute('aria-label') || packNode?.textContent || '';
   return rawValue.replace('#', '').trim();
 }
 
 function getOrderCheckbox(row) {
-  return row.querySelector('input[data-testid="row-checkbox"][type="checkbox"]');
+  return (
+    row.querySelector('input[data-testid="row-checkbox"][type="checkbox"]') ||
+    row.querySelector('input[type="checkbox"]')
+  );
 }
 
 function getOrderDetailUrl(orderId) {
@@ -3225,17 +3494,22 @@ function getOrderDetailUrl(orderId) {
 }
 
 function selectOrderCheckbox(checkbox) {
-  if (!checkbox || checkbox.disabled || checkbox.checked) {
-    return checkbox?.checked === true;
+  if (!checkbox || checkbox.disabled || checkbox.getAttribute('aria-disabled') === 'true') {
+    return false;
   }
+  if (checkbox.checked) return true;
 
-  const clickableTarget =
+  // Tenta clicar diretamente no input primeiro (mais confiável com React)
+  checkbox.click();
+  if (checkbox.checked) return true;
+
+  // Fallback: clica no wrapper caso o input sozinho não funcione
+  const wrapper =
     checkbox.closest('.andes-checkbox__checkbox') ||
-    checkbox.parentElement ||
-    checkbox;
-
-  clickableTarget.click();
-  if (!checkbox.checked) checkbox.click();
+    checkbox.parentElement;
+  if (wrapper && wrapper !== checkbox) {
+    wrapper.click();
+  }
 
   return checkbox.checked;
 }
@@ -3597,6 +3871,12 @@ function getOrderPickerSummary(entries) {
   });
 }
 
+function splitOrderPickerSearchTerm(term) {
+  const t = String(term || '').trim();
+  if (/^\d{6,}$/.test(t)) return { loginTerm: '', saleTerm: t };
+  return { loginTerm: t, saleTerm: '' };
+}
+
 function getOrderPickerSearchMatches(entries, loginTerm, saleTerm) {
   const loginKey = getOrderPickerSearchKey(loginTerm);
   const numeroVenda = normalizeOrderPickerSaleNumber(saleTerm);
@@ -3829,7 +4109,7 @@ function setOrderPickerView(view, panel = document.getElementById('sp-order-pane
 function renderOrderPickerSessionState(panel) {
   const quantityInput = panel?.querySelector('#sp-order-quantity');
   const runButton = panel?.querySelector('#sp-order-run');
-  const searchInputs = panel ? Array.from(panel.querySelectorAll('.sp-order-search-grid input')) : [];
+  const searchInputs = panel ? Array.from(panel.querySelectorAll('#sp-order-search')) : [];
   const refreshButton = panel?.querySelector('#sp-order-refresh');
   const clearButton = panel?.querySelector('#sp-order-clear');
   const ownEntryCount = getOwnOrderPickerHistoryEntries().length;
@@ -3886,8 +4166,7 @@ function renderOrderPickerDashboard(panel = document.getElementById('sp-order-pa
 
   const metrics = panel.querySelector('#sp-order-metrics');
   const historyTitle = panel.querySelector('#sp-order-history-title');
-  const searchLoginInput = panel.querySelector('#sp-order-search-login');
-  const searchSaleInput = panel.querySelector('#sp-order-search-sale');
+  const searchInput = panel.querySelector('#sp-order-search');
   const searchResult = panel.querySelector('#sp-order-search-result');
   const historyList = panel.querySelector('#sp-order-history-list');
   const reopenTodayButton = panel.querySelector('#sp-order-reopen-today');
@@ -3898,8 +4177,7 @@ function renderOrderPickerDashboard(panel = document.getElementById('sp-order-pa
   renderOrderPickerSessionState(panel);
 
   const ownEntries = getOwnOrderPickerHistoryEntries();
-  const loginTerm = String(searchLoginInput?.value || '').trim();
-  const saleTerm = String(searchSaleInput?.value || '').trim();
+  const { loginTerm, saleTerm } = splitOrderPickerSearchTerm(searchInput?.value);
   const hasFilter = Boolean(loginTerm || saleTerm);
   const searchEntries = hasFilter ? orderPickerSearchResults : [];
   const summary = getOrderPickerSummary(ownEntries);
@@ -3967,12 +4245,10 @@ function renderOrderPickerDashboard(panel = document.getElementById('sp-order-pa
 async function refreshOrderPickerDashboard(panel = document.getElementById('sp-order-panel'), force = false) {
   if (!panel) return;
 
-  const searchLoginInput = panel.querySelector('#sp-order-search-login');
-  const searchSaleInput = panel.querySelector('#sp-order-search-sale');
+  const searchInput = panel.querySelector('#sp-order-search');
   const searchResult = panel.querySelector('#sp-order-search-result');
   const historyList = panel.querySelector('#sp-order-history-list');
-  const loginTerm = String(searchLoginInput?.value || '').trim();
-  const saleTerm = String(searchSaleInput?.value || '').trim();
+  const { loginTerm, saleTerm } = splitOrderPickerSearchTerm(searchInput?.value);
   const hasFilter = Boolean(loginTerm || saleTerm);
 
   if (hasAuthSession()) {
@@ -4047,7 +4323,7 @@ function createOrderPickerPanel() {
     <div class="sp-order-view is-active" data-view="picker">
       <label class="sp-order-field">
         <span>Quantidade de pedidos</span>
-        <input id="sp-order-quantity" type="number" min="1" step="1" value="1" />
+        <input id="sp-order-quantity" type="number" min="1" step="1" value="0" />
       </label>
       <label class="sp-order-modo-mensagem">
         <input type="checkbox" id="sp-order-modo-mensagem" />
@@ -4059,15 +4335,12 @@ function createOrderPickerPanel() {
     </div>
     <div class="sp-order-view" data-view="history">
       <div id="sp-order-metrics" class="sp-order-metrics"></div>
-      <div class="sp-order-search-grid">
-        <label class="sp-order-field">
-          <span>Buscar por login</span>
-          <input id="sp-order-search-login" type="search" placeholder="Ex.: cliente123" />
-        </label>
-        <label class="sp-order-field">
-          <span>Buscar por venda</span>
-          <input id="sp-order-search-sale" type="search" placeholder="Ex.: 2000001234567890" />
-        </label>
+      <div class="sp-order-field">
+        <span>Buscar (login ou nº da venda)</span>
+        <div class="sp-order-search-wrap">
+          <input id="sp-order-search" type="search" placeholder="Ex.: cliente123 ou 2000001234567890" />
+          <button type="button" id="sp-order-search-clear" class="sp-order-search-clear" aria-label="Limpar busca" hidden>&#10005;</button>
+        </div>
       </div>
       <div id="sp-order-search-result" class="sp-order-search-result" data-tone="info"></div>
       <div class="sp-order-history-head">
@@ -4075,7 +4348,7 @@ function createOrderPickerPanel() {
         <div class="sp-order-history-actions">
           <button type="button" id="sp-order-reopen-today" class="sp-order-link">Reabrir pedidos do dia</button>
           <button type="button" id="sp-order-refresh" class="sp-order-link">Atualizar</button>
-          <button type="button" id="sp-order-clear" class="sp-order-link sp-order-link--danger">Limpar tudo</button>
+          ${isOrderPickerAdmin() ? '<button type="button" id="sp-order-clear" class="sp-order-link sp-order-link--danger">Limpar tudo</button>' : ''}
         </div>
       </div>
       <div id="sp-order-history-list" class="sp-order-history-list"></div>
@@ -4101,7 +4374,6 @@ function createOrderPickerPanel() {
     chrome.storage.local.set({ [PEGADOR_MODO_MENSAGEM_KEY]: modoMensagemToggle.checked });
   });
 
-  loadOrderPickerQuantity(quantityInput);
   renderOrderPickerSessionState(panel);
   void refreshOrderPickerDashboard(panel, true);
   runButton.addEventListener('click', runOrderPicker);
@@ -4124,14 +4396,23 @@ function createOrderPickerPanel() {
       quantityInput.dataset.autoClear = 'false';
     }
   });
-  panel.querySelectorAll('.sp-order-search-grid input').forEach((input) => {
-    input.addEventListener('input', () => {
-      if (searchRefreshTimeout) clearTimeout(searchRefreshTimeout);
-      searchRefreshTimeout = setTimeout(() => {
-        searchRefreshTimeout = null;
-        void refreshOrderPickerDashboard(panel);
-      }, 250);
-    });
+  const searchField = panel.querySelector('#sp-order-search');
+  const searchClearBtn = panel.querySelector('#sp-order-search-clear');
+
+  searchField?.addEventListener('input', () => {
+    if (searchClearBtn) searchClearBtn.hidden = !searchField.value;
+    if (searchRefreshTimeout) clearTimeout(searchRefreshTimeout);
+    searchRefreshTimeout = setTimeout(() => {
+      searchRefreshTimeout = null;
+      void refreshOrderPickerDashboard(panel);
+    }, 250);
+  });
+
+  searchClearBtn?.addEventListener('click', () => {
+    if (searchField) searchField.value = '';
+    searchClearBtn.hidden = true;
+    searchField?.focus();
+    void refreshOrderPickerDashboard(panel);
   });
   refreshButton.addEventListener('click', () => {
     void refreshOrderPickerDashboard(panel, true);
@@ -4172,13 +4453,13 @@ function createOrderPickerPanel() {
       renderOrderPickerDashboard(panel);
     }
   });
-  clearButton.addEventListener('click', async () => {
-    if (!hasAuthSession()) {
-      setOrderPickerStatus('Faça login no Hub para limpar o histórico.', 'error');
+  clearButton?.addEventListener('click', async () => {
+    if (!hasAuthSession() || !isOrderPickerAdmin()) {
+      setOrderPickerStatus('Sem permissão para limpar o histórico.', 'error');
       return;
     }
     if (!orderPickerHistoryCache.some((entry) => String(entry.userId || '') === String(auth.user?.id || ''))) return;
-    if (!window.confirm('Deseja excluir todo o seu histórico do painel?')) return;
+    if (!window.confirm('⚠️ ATENÇÃO\n\nEsta ação irá apagar PERMANENTEMENTE todo o seu histórico do Pegador de Pedidos.\n\nEsta operação não pode ser desfeita.\n\nDeseja continuar?')) return;
 
     try {
       await clearOrderPickerHistory();
@@ -5005,8 +5286,14 @@ async function toggleCustomerHistoryOverlay() {
   }
 
   let state = loadCustomerHistoryState();
-  if ((!state.login || !state.saleNumber) && getCurrentCustomerHistoryContext()) {
-    state = await queueCustomerHistoryLookup();
+  const context = getCurrentCustomerHistoryContext();
+
+  const noData = !state.login || !state.saleNumber;
+  const hadNoResults = state.status === 'loaded' && state.previousOrders.length === 0;
+
+  if ((noData || hadNoResults) && context) {
+    // Re-busca forçada quando resultado anterior foi vazio (retry ao clicar novamente)
+    state = await queueCustomerHistoryLookup({ force: hadNoResults });
   }
 
   if (!state.login || !state.saleNumber) {
@@ -5235,6 +5522,79 @@ function isOrderDetailMonitoringPage() {
   return isMercadoLivre && /\/vendas\/\d+\/detalhe/i.test(window.location.pathname);
 }
 
+function isOrderListPage() {
+  const isMercadoLivre =
+    window.location.hostname.includes('mercadolivre.com.br') ||
+    window.location.hostname.includes('mercadolibre.com');
+  return isMercadoLivre && /\/vendas(\/omni)?\/lista/i.test(window.location.pathname);
+}
+
+function scanListPageModoMensagem() {
+  if (!isOrderListPage()) return;
+
+  // Limpa highlights anteriores independente do estado do modo
+  document.querySelectorAll('.sn-mm-hl').forEach(el => {
+    el.classList.remove('sn-mm-hl');
+    el.style.removeProperty('background-color');
+    el.style.removeProperty('border-radius');
+    el.style.removeProperty('padding');
+  });
+  document.querySelectorAll('[data-sn-mm-scanned]').forEach(el => {
+    delete el.dataset.snMmScanned;
+  });
+
+  if (!modoMensagemCache) return;
+
+  const rows = getOrderRowsForPicker();
+  rows.forEach(row => {
+    if (!row.textContent.toLowerCase().includes('após a compra, por favor')) return;
+    if (row.dataset.snMmScanned) return;
+    row.dataset.snMmScanned = '1';
+
+    // Destaca o texto "Após a compra, por favor" no título do produto
+    const titleEl = findLeafContainerWithText(row, 'após a compra, por favor');
+    if (titleEl) {
+      highlightTextInElement(titleEl, 'após a compra, por favor', 'rgba(255, 220, 0, 0.45)');
+    }
+
+    // Destaca o número da venda (pack-id)
+    const packEl =
+      row.querySelector('.left-column__pack-id[aria-label^="#"]') ||
+      row.querySelector('[aria-label^="#"]') ||
+      row.querySelector('.left-column__pack-id');
+    if (packEl) {
+      packEl.classList.add('sn-mm-hl');
+      packEl.style.backgroundColor = 'rgba(255, 220, 0, 0.35)';
+      packEl.style.borderRadius = '3px';
+      packEl.style.padding = '1px 3px';
+    }
+
+    // Destaca o login do comprador
+    const loginEl =
+      row.querySelector('.buyer-nickName') ||
+      row.querySelector('[class*="buyer-nick"]') ||
+      row.querySelector('.buyer.ml-buyer');
+    if (loginEl) {
+      loginEl.classList.add('sn-mm-hl');
+      loginEl.style.backgroundColor = 'rgba(255, 220, 0, 0.35)';
+      loginEl.style.borderRadius = '3px';
+      loginEl.style.padding = '1px 3px';
+    }
+  });
+}
+
+function findLeafContainerWithText(root, searchText) {
+  const lower = searchText.toLowerCase();
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node;
+  while ((node = walker.nextNode())) {
+    if (node.textContent.toLowerCase().includes(lower)) {
+      return node.parentElement;
+    }
+  }
+  return null;
+}
+
 function getCurrentMonitoringOrderId() {
   const urlMatch = window.location.pathname.match(/\/vendas\/(\d+)\/detalhe/i);
   if (urlMatch?.[1]) return urlMatch[1];
@@ -5275,6 +5635,7 @@ function checkForOrders() {
     foundCases = detectAndHighlightCases();
     rangerPersistentCases = [...new Set(foundCases)];
     syncPersistentNotificationPanel();
+    scanListPageModoMensagem();
     if (wasObserverActive && observer) {
       observer.observe(document.body, { childList: true, subtree: true, characterData: true });
     }
@@ -5301,9 +5662,14 @@ function syncCustomerHistoryPersistentNotification(state = loadCustomerHistorySt
   syncPersistentNotificationPanel();
 }
 
+function getCaseTone(label) {
+  if (label === 'Solicitar Aro ao Cliente') return 'warning';
+  return 'alert';
+}
+
 function syncPersistentNotificationPanel() {
   const items = [
-    ...rangerPersistentCases.map((label) => ({ label, tone: 'alert' })),
+    ...rangerPersistentCases.map((label) => ({ label, tone: getCaseTone(label) })),
     ...(customerHistoryPersistentCase ? [customerHistoryPersistentCase] : [])
   ];
 
@@ -5330,6 +5696,10 @@ function detectAndHighlightCases() {
       while (el.firstChild) parent.insertBefore(el.firstChild, el);
       parent.removeChild(el);
     }
+  });
+  // Limpa os atributos de controle de highlight por texto
+  document.querySelectorAll('[data-sn-highlighted]').forEach(el => {
+    delete el.dataset.snHighlighted;
   });
 
   const quantityElements = document.querySelectorAll('.sc-quantity.sc-quantity__unique span');
@@ -5386,25 +5756,42 @@ function detectAndHighlightCases() {
 
   document.querySelectorAll('.sc-title-subtitle-action__label').forEach(el => {
     if (!el) return;
-    if (el.textContent.toLowerCase().includes('pedra')) {
+    const labelText = el.textContent.toLowerCase();
+    if (labelText.includes('pedra') && !labelText.includes('sem pedra')) {
       foundCases.push('Modelo com Pedra');
       highlightTextInElement(el, 'pedra');
     }
   });
 
+  let aposACompraDetected = false;
+  document.querySelectorAll('.sc-title-subtitle-action__label, .sc-title-subtitle-action__sublabel').forEach(el => {
+    if (!el) return;
+    if (el.textContent.toLowerCase().includes('após a compra, por favor')) {
+      highlightTextInElement(el, 'após a compra, por favor', 'rgba(255, 220, 0, 0.45)');
+      aposACompraDetected = true;
+    }
+  });
+  if (aposACompraDetected) {
+    foundCases.push('Solicitar Aro ao Cliente');
+  }
+
   return foundCases;
 }
 
-function highlightTextInElement(element, textToHighlight) {
+function highlightTextInElement(element, textToHighlight, bgColor = 'rgba(255, 0, 0, 0.2)') {
   if (!element || typeof element.innerHTML === 'undefined') return;
-  if (element.querySelector('.sentinela-target-text')) return;
   const innerHTML = element.innerHTML;
-  const regex = new RegExp(`(${textToHighlight})`, 'gi');
-  if (innerHTML.toLowerCase().includes(textToHighlight.toLowerCase())) {
-    element.innerHTML = innerHTML.replace(regex, (match) =>
-      `<span class="sentinela-target-text" style="background-color: rgba(255, 0, 0, 0.2); border-radius: 4px;">${match}</span>`
-    );
-  }
+  if (!innerHTML.toLowerCase().includes(textToHighlight.toLowerCase())) return;
+  // Evita duplo-highlight do mesmo texto no mesmo elemento usando lista CSV no dataset
+  const highlighted = (element.dataset.snHighlighted || '').split('|');
+  const key = textToHighlight.toLowerCase();
+  if (highlighted.includes(key)) return;
+  element.dataset.snHighlighted = [...highlighted, key].filter(Boolean).join('|');
+  const escaped = textToHighlight.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const regex = new RegExp(`(${escaped})`, 'gi');
+  element.innerHTML = innerHTML.replace(regex, (match) =>
+    `<span class="sentinela-target-text" style="background-color: ${bgColor}; border-radius: 4px;">${match}</span>`
+  );
 }
 
 function createHighlight(element) {
@@ -5464,7 +5851,7 @@ function showPersistentNotification(cases) {
       return {
         id: String(item.id || `case-${index}`),
         label: String(item.label || '').trim(),
-        tone: item.tone === 'history' ? 'history' : 'alert',
+        tone: item.tone === 'history' ? 'history' : item.tone === 'warning' ? 'warning' : 'alert',
         actionLabel: String(item.actionLabel || '').trim(),
         onClick: typeof item.onClick === 'function' ? item.onClick : null
       };
@@ -5489,8 +5876,14 @@ function showPersistentNotification(cases) {
   }
 
   const hasOnlyHistory = normalizedCases.every((item) => item.tone === 'history');
-  const accent = hasOnlyHistory ? '#22c55e' : '#ef4444';
-  const accentGradient = hasOnlyHistory ? 'linear-gradient(90deg,#16a34a 0%,#22c55e 100%)' : 'linear-gradient(90deg,#ef4444 0%,#f97316 100%)';
+  const hasAlert = normalizedCases.some((item) => item.tone === 'alert');
+  const hasOnlyWarningOrHistory = !hasAlert && normalizedCases.some((item) => item.tone === 'warning');
+  const accent = hasOnlyHistory ? '#22c55e' : hasOnlyWarningOrHistory ? '#facc15' : '#ef4444';
+  const accentGradient = hasOnlyHistory
+    ? 'linear-gradient(90deg,#16a34a 0%,#22c55e 100%)'
+    : hasOnlyWarningOrHistory
+      ? 'linear-gradient(90deg,#d97706 0%,#facc15 100%)'
+      : 'linear-gradient(90deg,#ef4444 0%,#f97316 100%)';
 
   const panel = document.createElement('div');
   panel.id = 'sentinela-persistent-notification';
@@ -5545,10 +5938,14 @@ function showPersistentNotification(cases) {
 
   normalizedCases.forEach((itemData) => {
     const isHistory = itemData.tone === 'history';
+    const isWarning = itemData.tone === 'warning';
+    const itemBg = isHistory ? 'rgba(34,197,94,0.08)' : isWarning ? 'rgba(250,204,21,0.1)' : 'rgba(239,68,68,0.08)';
+    const itemBorder = isHistory ? 'rgba(34,197,94,0.2)' : isWarning ? 'rgba(250,204,21,0.28)' : 'rgba(239,68,68,0.18)';
+    const itemDot = isHistory ? '#22c55e' : isWarning ? '#facc15' : '#ef4444';
     const item = document.createElement('div');
-    item.style.cssText = `display:flex;align-items:flex-start;gap:8px;padding:6px 9px;background:${isHistory ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.08)'};border:1px solid ${isHistory ? 'rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.18)'};border-radius:6px;${itemData.onClick ? 'cursor:pointer;' : ''}`;
+    item.style.cssText = `display:flex;align-items:flex-start;gap:8px;padding:6px 9px;background:${itemBg};border:1px solid ${itemBorder};border-radius:6px;${itemData.onClick ? 'cursor:pointer;' : ''}`;
     const dot = document.createElement('span');
-    dot.style.cssText = `width:5px;height:5px;background:${isHistory ? '#22c55e' : '#ef4444'};border-radius:50%;flex-shrink:0;margin-top:6px;`;
+    dot.style.cssText = `width:5px;height:5px;background:${itemDot};border-radius:50%;flex-shrink:0;margin-top:6px;`;
     const content = document.createElement('div');
     content.style.cssText = 'display:flex;flex-direction:column;gap:4px;min-width:0;';
     const txt = document.createElement('span');
@@ -5558,7 +5955,7 @@ function showPersistentNotification(cases) {
     if (itemData.actionLabel) {
       const action = document.createElement('span');
       action.textContent = itemData.actionLabel;
-      action.style.cssText = `font-size:11px;font-weight:700;color:${isHistory ? '#86efac' : '#fca5a5'};letter-spacing:0.02em;text-transform:uppercase;`;
+      action.style.cssText = `font-size:11px;font-weight:700;color:${isHistory ? '#86efac' : isWarning ? '#fde68a' : '#fca5a5'};letter-spacing:0.02em;text-transform:uppercase;`;
       content.appendChild(action);
     }
     item.appendChild(dot);
@@ -6261,48 +6658,62 @@ function init() { bootstrap(); }
 if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', init); } else { init(); }
 
 document.addEventListener('sp:auth-changed', async () => {
-  try {
-    if (hasAuthSession()) {
-      hubProfilesLoaded = false;
+  if (hasAuthSession()) {
+    hubProfilesLoaded = false;
+    try {
       await loadHubUserProfiles(true);
-      await initializePassoLargoForSession();
-      await loadGestorLocalState();
-      await loadGestorPendencias();
-      orderPickerHistoryLoaded = false;
-      await loadOrderPickerHistory(true);
-      if (document.getElementById('mr-panel')) {
-        refreshPanel();
-      }
-    } else {
-      passoLargoRemoteLoaded = false;
-      passoLargoLastSyncedSignature = '';
-      gestorPendencias = [];
-      gestorLoading = false;
-      gestorCurrentTab = 'pendencias';
-      gestorEmailSettings = normalizeGestorEmailSettings(null);
-      gestorEmailSentIds = new Set();
-      gestorCopiedIds = new Set();
-      gestorArchivedIds = new Set();
-      gestorLegacyArchivedIds = new Set();
-      gestorFefrelloSentIds = new Set();
-      hubProfilesCache = {};
-      hubProfilesLoaded = false;
-      orderPickerHistoryCache = [];
-      orderPickerHistoryLoaded = false;
-      orderPickerHistoryLoading = false;
-      syncGestorButton();
-      renderGestorPanelContent(document.getElementById('sp-gestor-panel'));
+    } catch (error) {
+      console.warn('[Sentinela Pro] Falha ao carregar perfis do Hub:', error instanceof Error ? error.message : error);
     }
 
-    if (document.getElementById('sp-order-panel')) {
-      renderOrderPickerSessionState(document.getElementById('sp-order-panel'));
-      renderOrderPickerDashboard(document.getElementById('sp-order-panel'));
+    try {
+      await initializePassoLargoForSession();
+    } catch (error) {
+      console.warn('[Sentinela Pro] Falha ao sincronizar Passo Largo:', error instanceof Error ? error.message : error);
     }
-  } catch (error) {
-    console.warn('[Sentinela Pro] Falha ao atualizar dados do Passo Largo apos login:', error instanceof Error ? error.message : error);
-    if (error instanceof Error) {
-      mostrarNotificacao(error.message, 'error');
+
+    try {
+      await loadGestorLocalState();
+      await loadGestorPendencias();
+    } catch (error) {
+      console.warn('[Sentinela Pro] Falha ao carregar Gestor:', error instanceof Error ? error.message : error);
     }
+
+    orderPickerHistoryLoaded = false;
+    try {
+      await loadOrderPickerHistory(true);
+    } catch (error) {
+      console.warn('[Sentinela Pro] Falha ao carregar histórico do Pegador:', error instanceof Error ? error.message : error);
+    }
+
+    if (document.getElementById('mr-panel')) {
+      refreshPanel();
+    }
+  } else {
+    passoLargoRemoteLoaded = false;
+    passoLargoLastSyncedSignature = '';
+    gestorPendencias = [];
+    gestorLoading = false;
+    gestorCurrentTab = 'pendencias';
+    gestorEmailSettings = normalizeGestorEmailSettings(null);
+    gestorEmailSentIds = new Set();
+    gestorCopiedIds = new Set();
+    gestorArchivedIds = new Set();
+    gestorLegacyArchivedIds = new Set();
+    gestorFefrelloSentIds = new Set();
+    hubProfilesCache = {};
+    hubProfilesLoaded = false;
+    orderPickerHistoryCache = [];
+    orderPickerHistoryLoaded = false;
+    orderPickerHistoryLoading = false;
+    syncGestorButton();
+    renderGestorPanelContent(document.getElementById('sp-gestor-panel'));
+  }
+
+  const orderPanel = document.getElementById('sp-order-panel');
+  if (orderPanel) {
+    renderOrderPickerSessionState(orderPanel);
+    renderOrderPickerDashboard(orderPanel);
   }
 });
 
@@ -6314,9 +6725,6 @@ document.addEventListener('click', e => {
   const authPanel = document.getElementById('sp-auth-panel');
   const bar = document.getElementById('sp-topbar');
 
-  if (gestorPanel?.classList.contains('visible') && !gestorPanel.contains(e.target) && !gestorBatchOverlay?.contains(e.target) && !bar?.contains(e.target)) {
-    closeGestorPanel();
-  }
 
   if (authPanel?.classList.contains('visible') && !authPanel.contains(e.target) && !bar?.contains(e.target)) {
     closeAuthPanel();
