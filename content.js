@@ -367,7 +367,7 @@ function getGestorLoginFromPage(pageText = '') {
   const loginCapturado = capturarLoginDoHTML();
   if (loginCapturado) return loginCapturado;
 
-  const match = String(pageText || '').match(/([^\s|]+(?:\s+[^\s|]+)*)\s*\|\s*CPF\s*\d+/);
+  const match = String(pageText || '').match(/([^\s|]+(?:\s+[^\s|]+)*)\s*\|\s*(?:CPF|CNPJ)\s*\d+/i);
   return match ? match[1].trim() : '';
 }
 
@@ -3585,7 +3585,7 @@ function extractOrderPickerLoginFromText(text) {
     /nickname\s*:?\s*([a-z0-9._-]{3,})/i,
     /usuario\s*:?\s*([a-z0-9._-]{3,})/i,
     /@([a-z0-9._-]{3,})/i,
-    /([a-z0-9._-]{3,})\s*\|\s*CPF/i
+    /([a-z0-9._-]{3,})\s*\|\s*(?:CPF|CNPJ)/i
   ];
 
   for (const pattern of labeledPatterns) {
@@ -6747,12 +6747,14 @@ function capturarLoginDoHTML() {
   const elementoLogin = document.querySelector('div.sc-title-subtitle-action__container p.sc-text');
   if (elementoLogin) {
     const textoCompleto = elementoLogin.textContent || elementoLogin.innerText;
-    const match = textoCompleto.match(/^([^|]+?)\s*\|\s*CPF/);
+    const match = textoCompleto.match(/^([^|]+?)\s*\|\s*(?:CPF|CNPJ)/i);
     if (match && match[1]) { return match[1].trim(); }
+    const pipeIndex = textoCompleto.indexOf('|');
+    if (pipeIndex > 0) { return textoCompleto.slice(0, pipeIndex).trim(); }
     return textoCompleto.trim();
   }
   const textoCompleto = document.body.innerText;
-  const loginMatch = textoCompleto.match(/([^\s|]+(?:\s+[^\s|]+)*)\s*\|\s*CPF\s*\d+/);
+  const loginMatch = textoCompleto.match(/([^\s|]+(?:\s+[^\s|]+)*)\s*\|\s*(?:CPF|CNPJ)\s*\d+/i);
   return loginMatch ? loginMatch[1].trim() : '';
 }
 
@@ -7123,7 +7125,7 @@ function atualizarApenasURL(novoURL) {
 function carregarDados() {
   try {
     const dadosSalvos = sessionStorage.getItem(SESSION_STORAGE_KEY);
-    if (dadosSalvos) return JSON.parse(dadosSalvos);
+    if (dadosSalvos) return normalizeClipStoredData(JSON.parse(dadosSalvos));
   } catch (e) { console.error('Erro ao carregar dados da sessão:', e); }
   return { login: '', modelo: '', aros: [], url: '' };
 }
@@ -7139,8 +7141,10 @@ function clipEmptyData() {
 
 function normalizeClipStoredData(dados) {
   if (!dados || typeof dados !== 'object') return clipEmptyData();
+  const rawLogin = String(dados.login || '').trim();
+  const cleanLogin = rawLogin.includes('|') ? rawLogin.split('|')[0].trim() : rawLogin;
   return {
-    login: String(dados.login || '').trim(),
+    login: cleanLogin,
     modelo: String(dados.modelo || '').trim(),
     aros: Array.isArray(dados.aros) ? dados.aros : [],
     url: String(dados.url || '').trim(),
