@@ -58,6 +58,8 @@ let orderPickerSearchResults = [];
 let orderPickerSearchQueryKey = '';
 let orderPickerSearchLoading = false;
 let orderPickerSearchRequestId = 0;
+let orderPickerLastSearchError = null;
+let tokenRefreshTimeout = null;
 let orderPickerTodaySequence = [];
 let hubProfilesCache = {};
 let hubProfilesLoaded = false;
@@ -175,6 +177,32 @@ async function refreshSession() {
   return data;
 }
 
+function getTokenExpiry(token) {
+  try {
+    const payload = JSON.parse(atob(token.split('.')[1]));
+    return typeof payload.exp === 'number' ? payload.exp * 1000 : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function scheduleTokenRefresh() {
+  clearTimeout(tokenRefreshTimeout);
+  if (!auth.token || !auth.refreshToken) return;
+
+  const expiry = getTokenExpiry(auth.token);
+  if (!expiry) return;
+
+  const delay = Math.max(expiry - Date.now() - 5 * 60 * 1000, 30 * 1000);
+  tokenRefreshTimeout = setTimeout(async () => {
+    if (!auth.refreshToken) return;
+    try {
+      await refreshSession();
+      scheduleTokenRefresh();
+    } catch (_) {}
+  }, delay);
+}
+
 async function sbFetch(path, opts = {}) {
   const headers = {
     'Content-Type': 'application/json',
@@ -186,7 +214,15 @@ async function sbFetch(path, opts = {}) {
   const res = await fetch(`${CFG.supabaseUrl}${path}`, { ...opts, headers });
 
   if (res.status === 401 && auth.refreshToken) {
-    await refreshSession();
+    try {
+      await refreshSession();
+      scheduleTokenRefresh();
+    } catch (_) {
+      auth = { user: null, token: null, refreshToken: null };
+      await clearSession();
+      notifyAuthChanged();
+      throw new Error('Sessão expirada. Faça login novamente no Hub (Alt+U).');
+    }
     headers.Authorization = `Bearer ${auth.token}`;
     const retry = await fetch(`${CFG.supabaseUrl}${path}`, { ...opts, headers });
     if (!retry.ok) {
@@ -235,6 +271,7 @@ async function restoreAuthSession() {
     refreshToken: session.refresh_token || null
   };
   notifyAuthChanged();
+  scheduleTokenRefresh();
   return true;
 }
 
@@ -1943,6 +1980,7 @@ async function onAuthLogin() {
       user: session.user
     });
     notifyAuthChanged();
+    scheduleTokenRefresh();
     openAuthPanel();
     setAuthPanelStatus('Login realizado com sucesso.', 'success');
     mostrarNotificacao('Conta conectada no Sentinela Pro.');
@@ -3712,6 +3750,7 @@ async function searchOrderPickerHistory(loginTerm, saleTerm, force = false) {
     orderPickerSearchResults = [];
     orderPickerSearchQueryKey = '';
     orderPickerSearchLoading = false;
+    orderPickerLastSearchError = null;
     return [];
   }
 
@@ -4129,7 +4168,7 @@ function buildOrderPickerHistoryItem(entry) {
   const safeUrl = escapeHtml(entry.url || getOrderDetailUrl(entry.numeroVenda));
   const safeResponsavel = escapeHtml(entry.responsavel || 'Usuário do Hub');
 
-  const canDelete = String(entry.userId || '') === String(auth.user?.id || '');
+  const canDelete = isOrderPickerAdmin() && String(entry.userId || '') === String(auth.user?.id || '');
   return `
     <article class="sp-order-history-item">
       <div class="sp-order-history-item__head">
@@ -4233,7 +4272,7 @@ function renderOrderPickerDashboard(panel = document.getElementById('sp-order-pa
     searchResult.innerHTML = `<p>${searchEntries.length} registro(s) encontrado(s) para o filtro informado.</p>${responsaveis.length ? `<p>Responsável(eis): ${escapeHtml(responsaveis.join(', '))}</p>` : ''}`;
   } else {
     searchResult.dataset.tone = 'error';
-    searchResult.innerHTML = '<p>Nenhum registro encontrado para esse filtro.</p>';
+    searchResult.innerHTML = `<p>${escapeHtml(orderPickerLastSearchError || 'Nenhum registro encontrado para esse filtro.')}</p>`;
   }
 
   const groups = getOrderPickerHistoryGroups(searchEntries.slice(0, 40));
@@ -4256,6 +4295,7 @@ async function refreshOrderPickerDashboard(panel = document.getElementById('sp-o
       await loadTodayOrderPickerSequence();
       await loadOrderPickerHistory(force);
       if (hasFilter) {
+        orderPickerLastSearchError = null;
         if (searchResult) {
           searchResult.dataset.tone = 'info';
           searchResult.innerHTML = '<p>Buscando registros nos outros usuários...</p>';
@@ -4272,11 +4312,8 @@ async function refreshOrderPickerDashboard(panel = document.getElementById('sp-o
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      orderPickerLastSearchError = message;
       setOrderPickerStatus(message, 'error');
-      if (searchResult) {
-        searchResult.dataset.tone = 'error';
-        searchResult.innerHTML = `<p>${escapeHtml(message)}</p>`;
-      }
     }
   } else {
     orderPickerSearchRequestId += 1;
