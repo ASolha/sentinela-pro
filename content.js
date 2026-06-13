@@ -5722,7 +5722,10 @@ function getCaseTone(label) {
 
 function syncPersistentNotificationPanel() {
   const items = [
-    ...rangerPersistentCases.map((label) => ({ label, tone: getCaseTone(label) })),
+    ...rangerPersistentCases.map((item) => {
+      if (typeof item === 'object' && item !== null) return { label: item.label, tone: item.tone };
+      return { label: item, tone: getCaseTone(item) };
+    }),
     ...(customerHistoryPersistentCase ? [customerHistoryPersistentCase] : [])
   ];
 
@@ -5817,7 +5820,7 @@ function detectAndHighlightCases() {
   });
 
   let aposACompraDetected = false;
-  document.querySelectorAll('.sc-title-subtitle-action__label, .sc-title-subtitle-action__sublabel').forEach(el => {
+  document.querySelectorAll('.sc-title-subtitle-action__label, .sc-title-subtitle-action__sublabel, .andes-list__item-primary').forEach(el => {
     if (!el) return;
     if (el.textContent.toLowerCase().includes('após a compra, por favor')) {
       highlightTextInElement(el, 'após a compra, por favor', 'rgba(255, 220, 0, 0.45)');
@@ -5826,6 +5829,82 @@ function detectAndHighlightCases() {
   });
   if (aposACompraDetected) {
     foundCases.push('Solicitar Aro ao Cliente');
+    const priceEl = document.querySelector('.sc-price__label');
+    const sectionInfoEl = document.querySelector('.section-item-information');
+    const quantityEl = document.querySelector('.sc-quantity.sc-quantity__unique span')
+      || document.querySelector('.sidebar__section-item__quantity')
+      || sectionInfoEl?.querySelector('.sidebar__section-item__quantity');
+    let priceText = priceEl?.textContent?.trim() || '';
+    if (!priceText && sectionInfoEl) {
+      const fraction = sectionInfoEl.querySelector('.andes-money-amount__fraction');
+      const cents = sectionInfoEl.querySelector('.andes-money-amount__cents');
+      if (fraction) priceText = `R$ ${fraction.textContent.trim()}${cents ? ',' + cents.textContent.trim() : ''}`;
+    }
+    const quantityText = quantityEl?.textContent?.trim() || '';
+    if (priceText && quantityText && /^1\s*unidade$/i.test(quantityText)) {
+      foundCases.push({ label: 'Aliança Avulsa', tone: 'avulsa', id: 'avulsa-ring' });
+      const purpleBg = 'rgba(139,92,246,0.22)';
+      const purpleShadow = 'inset 0 0 0 2px #8b5cf6';
+      if (sectionInfoEl) {
+        sectionInfoEl.classList.add('sentinela-target');
+        sectionInfoEl.style.backgroundColor = purpleBg;
+        sectionInfoEl.style.boxShadow = purpleShadow;
+        sectionInfoEl.style.borderRadius = '6px';
+        sectionInfoEl.style.padding = '4px 8px';
+      } else {
+        if (priceEl) {
+          priceEl.classList.add('sentinela-target');
+          priceEl.style.backgroundColor = purpleBg;
+          priceEl.style.boxShadow = purpleShadow;
+          priceEl.style.borderRadius = '4px';
+          priceEl.style.padding = '0 2px';
+        }
+        if (quantityEl) {
+          quantityEl.classList.add('sentinela-target');
+          quantityEl.style.backgroundColor = purpleBg;
+          quantityEl.style.boxShadow = purpleShadow;
+          quantityEl.style.borderRadius = '4px';
+          quantityEl.style.padding = '0 2px';
+        }
+      }
+    }
+  }
+
+  // Detecção avulsa por preço R$ 114,90 + 1 unidade (independente de "após a compra")
+  let avulsaByTitleDetected = false;
+  document.querySelectorAll('.sc-product').forEach(product => {
+    const priceCheck = product.querySelector('.sc-price__label');
+    if (!priceCheck || !priceCheck.textContent.includes('114,90')) return;
+    const qtyEl = product.querySelector('.sc-quantity.sc-quantity__unique span');
+    if (!qtyEl || !/^1\s*unidade$/i.test(qtyEl.textContent.trim())) return;
+    avulsaByTitleDetected = true;
+    const priceEl = priceCheck;
+    const sectionInfoEl = product.querySelector('.section-item-information');
+    const purpleBg = 'rgba(139,92,246,0.22)';
+    const purpleShadow = 'inset 0 0 0 2px #8b5cf6';
+    if (sectionInfoEl) {
+      sectionInfoEl.classList.add('sentinela-target');
+      sectionInfoEl.style.backgroundColor = purpleBg;
+      sectionInfoEl.style.boxShadow = purpleShadow;
+      sectionInfoEl.style.borderRadius = '6px';
+      sectionInfoEl.style.padding = '4px 8px';
+    } else {
+      if (priceEl) {
+        priceEl.classList.add('sentinela-target');
+        priceEl.style.backgroundColor = purpleBg;
+        priceEl.style.boxShadow = purpleShadow;
+        priceEl.style.borderRadius = '4px';
+        priceEl.style.padding = '0 2px';
+      }
+      qtyEl.classList.add('sentinela-target');
+      qtyEl.style.backgroundColor = purpleBg;
+      qtyEl.style.boxShadow = purpleShadow;
+      qtyEl.style.borderRadius = '4px';
+      qtyEl.style.padding = '0 2px';
+    }
+  });
+  if (avulsaByTitleDetected && !foundCases.some(c => c === 'Aliança Avulsa' || (c && c.id === 'avulsa-ring'))) {
+    foundCases.push({ label: 'Aliança Avulsa', tone: 'avulsa', id: 'avulsa-ring' });
   }
 
   return foundCases;
@@ -5904,7 +5983,7 @@ function showPersistentNotification(cases) {
       return {
         id: String(item.id || `case-${index}`),
         label: String(item.label || '').trim(),
-        tone: item.tone === 'history' ? 'history' : item.tone === 'warning' ? 'warning' : 'alert',
+        tone: item.tone === 'history' ? 'history' : item.tone === 'warning' ? 'warning' : item.tone === 'avulsa' ? 'avulsa' : 'alert',
         actionLabel: String(item.actionLabel || '').trim(),
         onClick: typeof item.onClick === 'function' ? item.onClick : null
       };
@@ -5992,9 +6071,10 @@ function showPersistentNotification(cases) {
   normalizedCases.forEach((itemData) => {
     const isHistory = itemData.tone === 'history';
     const isWarning = itemData.tone === 'warning';
-    const itemBg = isHistory ? 'rgba(34,197,94,0.08)' : isWarning ? 'rgba(250,204,21,0.1)' : 'rgba(239,68,68,0.08)';
-    const itemBorder = isHistory ? 'rgba(34,197,94,0.2)' : isWarning ? 'rgba(250,204,21,0.28)' : 'rgba(239,68,68,0.18)';
-    const itemDot = isHistory ? '#22c55e' : isWarning ? '#facc15' : '#ef4444';
+    const isAvulsa = itemData.tone === 'avulsa';
+    const itemBg = isAvulsa ? 'rgba(139,92,246,0.1)' : isHistory ? 'rgba(34,197,94,0.08)' : isWarning ? 'rgba(250,204,21,0.1)' : 'rgba(239,68,68,0.08)';
+    const itemBorder = isAvulsa ? 'rgba(139,92,246,0.3)' : isHistory ? 'rgba(34,197,94,0.2)' : isWarning ? 'rgba(250,204,21,0.28)' : 'rgba(239,68,68,0.18)';
+    const itemDot = isAvulsa ? '#8b5cf6' : isHistory ? '#22c55e' : isWarning ? '#facc15' : '#ef4444';
     const item = document.createElement('div');
     item.style.cssText = `display:flex;align-items:flex-start;gap:8px;padding:6px 9px;background:${itemBg};border:1px solid ${itemBorder};border-radius:6px;${itemData.onClick ? 'cursor:pointer;' : ''}`;
     const dot = document.createElement('span');
@@ -6008,7 +6088,7 @@ function showPersistentNotification(cases) {
     if (itemData.actionLabel) {
       const action = document.createElement('span');
       action.textContent = itemData.actionLabel;
-      action.style.cssText = `font-size:11px;font-weight:700;color:${isHistory ? '#86efac' : isWarning ? '#fde68a' : '#fca5a5'};letter-spacing:0.02em;text-transform:uppercase;`;
+      action.style.cssText = `font-size:11px;font-weight:700;color:${isAvulsa ? '#c4b5fd' : isHistory ? '#86efac' : isWarning ? '#fde68a' : '#fca5a5'};letter-spacing:0.02em;text-transform:uppercase;`;
       content.appendChild(action);
     }
     item.appendChild(dot);
