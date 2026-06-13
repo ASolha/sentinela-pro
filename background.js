@@ -101,6 +101,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.action === 'enqueueCustomerHistoryLookup') {
     const login = normalizeCustomerHistoryLogin(message.login);
+    const originalLogin = String(message.login || '').trim();
     const saleNumber = normalizeCustomerHistorySaleNumber(message.saleNumber);
     const requestId = String(message.requestId || '').trim();
     const tabId = sender?.tab?.id;
@@ -110,7 +111,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return false;
     }
 
-    enqueueCustomerHistoryLookup(tabId, login, saleNumber, requestId);
+    enqueueCustomerHistoryLookup(tabId, login, originalLogin, saleNumber, requestId);
     sendResponse({ ok: true, queued: true });
     return false;
   }
@@ -172,9 +173,9 @@ function sendCustomerHistoryLookupResult(tabId, payload) {
   }).catch(() => {});
 }
 
-function enqueueCustomerHistoryLookup(tabId, login, saleNumber, requestId) {
+function enqueueCustomerHistoryLookup(tabId, login, originalLogin, saleNumber, requestId) {
   const cachedResults = getCustomerHistoryCache(login);
-  if (cachedResults && cachedResults.length > 0) {
+  if (cachedResults !== null) {
     sendCustomerHistoryLookupResult(tabId, {
       login,
       saleNumber,
@@ -189,6 +190,7 @@ function enqueueCustomerHistoryLookup(tabId, login, saleNumber, requestId) {
   if (!entry) {
     entry = {
       login,
+      originalLogin: originalLogin || login,
       requests: new Map(),
       status: 'queued'
     };
@@ -249,7 +251,7 @@ async function runCustomerHistoryLookup(entry) {
     try {
       const response = await chrome.tabs.sendMessage(request.tabId, {
         action: 'run_customer_history_lookup',
-        login: entry.login
+        login: entry.originalLogin || entry.login
       });
 
       if (response?.ok) {

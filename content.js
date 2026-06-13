@@ -5046,7 +5046,7 @@ function parseCustomerHistorySearchResults(html, targetLogin = '') {
     const login = decodeCustomerHistoryEscapedString((snippet.match(/"nickName":"([^"]+)"/) || [])[1] || '');
     const normalizedLogin = normalizeOrderPickerLogin(login);
 
-    if (targetLoginKey && getOrderPickerSearchKey(normalizedLogin) !== targetLoginKey) return;
+    if (targetLoginKey && normalizedLogin && getOrderPickerSearchKey(normalizedLogin) !== targetLoginKey) return;
 
     const entry = normalizeCustomerHistoryEntry({
       saleNumber,
@@ -5074,7 +5074,7 @@ function parseCustomerHistorySearchResults(html, targetLogin = '') {
 }
 
 function buildCustomerHistorySearchUrl(login) {
-  return `${window.location.origin}/vendas/omni/lista?filters=&subFilters=&search=${encodeURIComponent(login)}&limit=50&offset=0&startPeriod=WITH_DATE_CLOSED_6M_OLD`;
+  return `${window.location.origin}/vendas/omni/lista?filters=&subFilters=&search=${encodeURIComponent(login)}&limit=50&offset=0`;
 }
 
 function performCustomerHistoryLookup(login) {
@@ -5094,7 +5094,11 @@ function performCustomerHistoryLookup(login) {
     const finish = (callback) => {
       if (settled) return;
       cleanup();
-      callback();
+      try {
+        callback();
+      } catch (err) {
+        reject(err instanceof Error ? err : new Error(String(err || 'Falha ao processar resultado de recompra.')));
+      }
     };
 
     const attemptRead = (allowEmpty = false) => {
@@ -5240,13 +5244,24 @@ function buildCustomerHistoryCard(entry) {
   const messageUrl = escapeHtml(entry.messageUrl || '');
   const detailUrl = escapeHtml(entry.detailUrl || '');
 
+  const dateTs = parseCustomerHistoryDateValue(entry.date);
+  const ageDays = Number.isFinite(dateTs) ? Math.floor((Date.now() - dateTs) / 86400000) : NaN;
+  const outOfWarranty = Number.isFinite(ageDays) && ageDays > 180;
+
+  const warrantyTag = outOfWarranty
+    ? `<div style="margin-top:5px;display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;background:rgba(239,68,68,0.16);border:1px solid rgba(239,68,68,0.32);color:#fca5a5;font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;">Fora de garantia · ${ageDays} dias</div>`
+    : '';
+
+  const cardBorder = outOfWarranty ? 'rgba(239,68,68,0.24)' : 'rgba(34,197,94,0.16)';
+
   return `
-    <article style="padding:12px;border:1px solid rgba(34,197,94,0.16);border-radius:14px;background:rgba(18,24,27,0.84);box-shadow:0 12px 28px rgba(2,6,23,0.22);">
+    <article style="padding:12px;border:1px solid ${cardBorder};border-radius:14px;background:rgba(18,24,27,0.84);box-shadow:0 12px 28px rgba(2,6,23,0.22);">
       <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:8px;">
         <div style="min-width:0;">
           <strong style="display:block;font-size:13px;line-height:1.4;color:#f8fafc;">${safeModel}</strong>
           <div style="margin-top:4px;font-size:12px;color:rgba(226,232,240,0.8);">#${safeSale} • ${safeDate}</div>
           ${safeSizes ? `<div style="margin-top:4px;font-size:12px;color:#bbf7d0;">${safeSizes}</div>` : ''}
+          ${warrantyTag}
         </div>
         <span style="flex:0 0 auto;padding:4px 8px;border-radius:999px;background:rgba(34,197,94,0.14);color:#bbf7d0;font-size:10px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;">Anterior</span>
       </div>
@@ -5357,7 +5372,8 @@ async function queueCustomerHistoryLookup(options = {}) {
   const currentState = loadCustomerHistoryState();
   const requestKey = getCustomerHistoryRequestKey(context.login, context.saleNumber);
 
-  if (!force && currentState.requestKey === requestKey && (currentState.status === 'loading' || currentState.status === 'loaded')) {
+  const isStaleLoading = currentState.status === 'loading' && (Date.now() - (currentState.updatedAt || 0)) > 45_000;
+  if (!force && !isStaleLoading && currentState.requestKey === requestKey && (currentState.status === 'loading' || currentState.status === 'loaded')) {
     syncCustomerHistoryPersistentNotification(currentState);
     syncCustomerHistoryButton();
     return currentState.status === 'loaded' ? maybeAnnounceCustomerHistory(currentState) : currentState;
