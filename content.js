@@ -5841,7 +5841,7 @@ function detectAndHighlightCases() {
       if (fraction) priceText = `R$ ${fraction.textContent.trim()}${cents ? ',' + cents.textContent.trim() : ''}`;
     }
     const quantityText = quantityEl?.textContent?.trim() || '';
-    if (priceText && quantityText && /^1\s*unidade$/i.test(quantityText)) {
+    if (priceText && priceText.includes('114,90') && quantityText && /^1\s*unidade$/i.test(quantityText)) {
       foundCases.push({ label: 'Aliança Avulsa', tone: 'avulsa', id: 'avulsa-ring' });
       const purpleBg = 'rgba(139,92,246,0.22)';
       const purpleShadow = 'inset 0 0 0 2px #8b5cf6';
