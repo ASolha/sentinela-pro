@@ -4404,6 +4404,12 @@ function createOrderPickerPanel() {
   const modoMensagemToggle = panel.querySelector('#sp-order-modo-mensagem');
   let searchRefreshTimeout = null;
 
+  const _currentDisplayName = getAuthUserDisplayName().toLowerCase();
+  const _modoMensagemHidden = ['tiago', 'victor'].some((name) => _currentDisplayName.startsWith(name));
+  if (_modoMensagemHidden) {
+    panel.querySelector('.sp-order-modo-mensagem')?.style.setProperty('display', 'none');
+  }
+
   chrome.storage.local.get({ [PEGADOR_MODO_MENSAGEM_KEY]: false }, (result) => {
     modoMensagemToggle.checked = result[PEGADOR_MODO_MENSAGEM_KEY];
   });
@@ -5309,7 +5315,11 @@ function renderCustomerHistoryOverlay() {
     </div>
     <div style="display:flex;flex-direction:column;gap:10px;max-height:min(58vh,560px);overflow:auto;padding-right:4px;">
       ${state.previousOrders.length
-        ? state.previousOrders.map(buildCustomerHistoryCard).join('')
+        ? state.previousOrders.slice().sort((a, b) => {
+            const ta = parseCustomerHistoryDateValue(a.date);
+            const tb = parseCustomerHistoryDateValue(b.date);
+            return (Number.isFinite(tb) ? tb : 0) - (Number.isFinite(ta) ? ta : 0);
+          }).map(buildCustomerHistoryCard).join('')
         : `<div style="padding:14px;border-radius:14px;background:rgba(255,255,255,0.05);font-size:13px;line-height:1.5;color:rgba(226,232,240,0.86);">${escapeHtml(summaryText)}</div>`}
     </div>
   `;
