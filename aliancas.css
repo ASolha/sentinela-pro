@@ -1,0 +1,321 @@
+:root {
+  --bg: #0f1216;
+  --surface: #171b21;
+  --surface-2: #1e242c;
+  --surface-3: #262d37;
+  --border: #2c343f;
+  --text: #e8ecf1;
+  --text-dim: #9aa5b1;
+  --text-faint: #6b7684;
+  --accent: #d4af37;
+  --accent-soft: rgba(212, 175, 55, 0.14);
+  --primary: #3b82f6;
+  --primary-hover: #2f6fd6;
+  --green: #22c55e;
+  --green-soft: rgba(34, 197, 94, 0.15);
+  --red: #ef4444;
+  --red-soft: rgba(239, 68, 68, 0.14);
+  --amber: #f59e0b;
+  --radius: 12px;
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  font-family: "Segoe UI", system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+}
+
+#al-app {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 26px clamp(18px, 4vw, 44px) 60px;
+}
+
+/* ── Header ─────────────────────────────────────────── */
+.al-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--border);
+}
+.al-header__brand { display: flex; align-items: center; gap: 14px; }
+.al-logo {
+  width: 46px; height: 46px;
+  display: grid; place-items: center;
+  font-size: 24px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid rgba(212, 175, 55, 0.35);
+  border-radius: 12px;
+}
+.al-header h1 { margin: 0; font-size: 22px; font-weight: 650; letter-spacing: 0.2px; }
+.al-sub { margin: 2px 0 0; color: var(--text-dim); font-size: 13px; }
+.al-header__user { display: flex; align-items: center; gap: 10px; }
+.al-user-name {
+  font-size: 14px; color: var(--text-dim);
+  background: var(--surface-2);
+  padding: 6px 12px; border-radius: 999px;
+  border: 1px solid var(--border);
+}
+.al-conn { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
+.al-conn--on { background: var(--green); box-shadow: 0 0 8px var(--green); }
+.al-conn--off { background: var(--red); }
+
+/* ── Toolbar ────────────────────────────────────────── */
+.al-toolbar {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 14px; flex-wrap: wrap;
+  margin: 18px 0 6px;
+}
+.al-tabs { display: flex; gap: 4px; background: var(--surface); padding: 4px; border-radius: 10px; border: 1px solid var(--border); }
+.al-tab {
+  border: 0; background: transparent; color: var(--text-dim);
+  padding: 8px 16px; border-radius: 8px; cursor: pointer;
+  font-size: 14px; font-weight: 550;
+}
+.al-tab:hover { color: var(--text); }
+.al-tab.is-active { background: var(--surface-3); color: var(--text); }
+.al-toolbar__actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* ── Buttons ────────────────────────────────────────── */
+.al-btn {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  padding: 9px 16px;
+  border-radius: 9px;
+  font-size: 14px; font-weight: 560;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, transform .05s;
+}
+.al-btn:hover { background: var(--surface-3); }
+.al-btn:active { transform: translateY(1px); }
+.al-btn--primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+.al-btn--primary:hover { background: var(--primary-hover); }
+.al-btn--ghost { background: transparent; }
+.al-btn--danger { background: var(--red-soft); border-color: rgba(239,68,68,.4); color: #fca5a5; }
+.al-btn--sm { padding: 6px 11px; font-size: 12.5px; }
+.al-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* ── Status / counters ──────────────────────────────── */
+.al-status {
+  margin: 14px 0; padding: 11px 15px; border-radius: 10px;
+  font-size: 14px; border: 1px solid var(--border); background: var(--surface-2);
+}
+.al-status--error { background: var(--red-soft); border-color: rgba(239,68,68,.4); color: #fca5a5; }
+.al-status--success { background: var(--green-soft); border-color: rgba(34,197,94,.4); color: #86efac; }
+.al-counters { display: flex; gap: 10px; flex-wrap: wrap; margin: 16px 0 4px; }
+.al-counter {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 16px; min-width: 96px;
+}
+.al-counter b { display: block; font-size: 22px; font-weight: 680; }
+.al-counter span { font-size: 12.5px; color: var(--text-dim); }
+
+/* ── Cards ──────────────────────────────────────────── */
+.al-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(290px, 1fr));
+  gap: 14px; margin-top: 18px;
+}
+/* Modo colunas: uma coluna (cascata) por usuário, quando há 2+ com cards */
+.al-cards--cols {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+}
+.al-col {
+  flex: 1 1 300px;
+  min-width: 280px;
+  max-width: 460px;
+  display: flex; flex-direction: column; gap: 12px;
+}
+.al-col__head {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 2px 10px; border-bottom: 2px solid var(--border);
+  position: sticky; top: 0; z-index: 2; background: var(--bg);
+}
+.al-col__name { font-size: 15px; font-weight: 640; }
+.al-col__count { font-size: 12px; color: var(--text-dim); }
+.al-col__cards { display: flex; flex-direction: column; gap: 12px; }
+.al-card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 15px 16px;
+  display: flex; flex-direction: column; gap: 10px;
+  position: relative;
+}
+.al-card.is-finalizado { border-color: rgba(34,197,94,.35); }
+.al-card__top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.al-card__title { font-size: 15px; font-weight: 620; line-height: 1.3; }
+.al-card__title.is-empty { color: var(--text-faint); font-weight: 500; font-style: italic; }
+.al-badge {
+  font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 999px;
+  white-space: nowrap;
+}
+.al-badge--aberto { background: var(--surface-3); color: var(--text-dim); }
+.al-badge--finalizado { background: var(--green-soft); color: #86efac; }
+.al-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.al-chip {
+  font-size: 12px; padding: 4px 10px; border-radius: 999px;
+  background: var(--accent-soft); color: var(--accent);
+  border: 1px solid rgba(212,175,55,.3);
+}
+.al-chip--none { background: var(--surface-2); color: var(--text-faint); border-color: var(--border); }
+.al-card__qtd { font-size: 13px; color: var(--text-dim); }
+.al-card__qtd b { color: var(--text); }
+.al-card__obs { font-size: 13.5px; color: var(--text-dim); line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+.al-card__meta { font-size: 12px; color: var(--text-faint); display: flex; justify-content: space-between; gap: 8px; }
+.al-card__actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 2px; border-top: 1px solid var(--border); padding-top: 11px; }
+
+.al-empty {
+  text-align: center; padding: 60px 20px; color: var(--text-dim);
+  display: flex; flex-direction: column; align-items: center; gap: 16px;
+}
+
+/* ── Histórico ──────────────────────────────────────── */
+.al-historico { display: flex; flex-direction: column; gap: 16px; margin-top: 18px; }
+.al-batch {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden;
+}
+.al-batch__head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 14px 18px; cursor: pointer; background: var(--surface-2);
+}
+.al-batch__head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.al-batch__head span { font-size: 13px; color: var(--text-dim); }
+.al-batch__head-right { display: flex; align-items: center; gap: 12px; }
+.al-batch__body { padding: 6px 18px 18px; }
+.al-resumo-line {
+  display: flex; align-items: baseline; gap: 10px; padding: 8px 0;
+  border-bottom: 1px dashed var(--border); font-size: 14px;
+}
+.al-resumo-line:last-child { border-bottom: 0; }
+.al-resumo-line b { font-size: 17px; color: var(--accent); min-width: 34px; }
+.al-batch__section {
+  font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px;
+  color: var(--text-faint); margin: 16px 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--border);
+}
+.al-batch__section:first-child { margin-top: 4px; }
+.al-hist-casos { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+.al-hist-caso { background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; }
+.al-hist-caso__head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.al-hist-caso__title { font-size: 14px; font-weight: 600; }
+.al-hist-caso__title.is-empty { color: var(--text-faint); font-weight: 500; font-style: italic; }
+.al-hist-caso__qtd { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+
+/* ── Modal ──────────────────────────────────────────── */
+.al-modal { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.al-modal[hidden] { display: none; }
+.al-modal__backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.62); backdrop-filter: blur(2px); }
+.al-modal__box {
+  position: relative; z-index: 1; width: min(560px, 100%);
+  max-height: 90vh; overflow-y: auto;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 16px; box-shadow: var(--shadow);
+}
+.al-modal__head {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 18px 22px; border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; background: var(--surface);
+}
+.al-modal__head h2 { margin: 0; font-size: 18px; }
+.al-modal__close { background: transparent; border: 0; color: var(--text-dim); font-size: 18px; cursor: pointer; }
+.al-modal__close:hover { color: var(--text); }
+
+/* ── Form ───────────────────────────────────────────── */
+.al-form { padding: 20px 22px; display: flex; flex-direction: column; gap: 18px; }
+.al-field { display: flex; flex-direction: column; gap: 7px; }
+.al-field > span { font-size: 13.5px; font-weight: 560; color: var(--text); }
+.al-field > span em { color: var(--text-faint); font-weight: 400; font-style: normal; }
+.al-field input[type="text"], .al-field input[type="number"], .al-field textarea, .al-seletor-add input {
+  background: var(--surface-2); border: 1px solid var(--border); color: var(--text);
+  padding: 10px 12px; border-radius: 9px; font-size: 14px; font-family: inherit; width: 100%;
+}
+.al-field textarea { resize: vertical; }
+.al-field input:focus, .al-field textarea:focus, .al-seletor-add input:focus { outline: 2px solid var(--primary); outline-offset: -1px; border-color: var(--primary); }
+.al-field--qtd input { max-width: 120px; }
+.al-hint { font-size: 12px; color: var(--text-faint); }
+
+.al-checks { display: flex; flex-wrap: wrap; gap: 8px; }
+.al-check {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  padding: 8px 13px; border-radius: 999px; cursor: pointer; font-size: 13.5px;
+  user-select: none;
+}
+.al-check:hover { border-color: var(--text-faint); }
+.al-check input { display: none; }
+.al-check.is-checked { background: var(--accent-soft); border-color: rgba(212,175,55,.5); color: var(--accent); font-weight: 600; }
+
+.al-form__footer { display: flex; justify-content: flex-end; gap: 10px; padding-top: 4px; }
+
+/* Rodapés/textos que ficam soltos direto na caixa do modal (fora de .al-form)
+   precisam do próprio espaçamento lateral/inferior. */
+.al-modal__box > .al-form__footer { padding: 6px 22px 22px; }
+.al-modal__box > .al-hint { padding: 4px 22px 20px; margin: 0; }
+
+/* ── Resumo ─────────────────────────────────────────── */
+.al-resumo { padding: 20px 22px; }
+.al-resumo__total {
+  margin-top: 14px; padding-top: 14px; border-top: 2px solid var(--border);
+  font-size: 15px; display: flex; justify-content: space-between;
+}
+.al-resumo__total b { font-size: 20px; color: var(--accent); }
+.al-resumo__empty { color: var(--text-dim); text-align: center; padding: 30px 0; }
+
+/* ── Seletores admin ────────────────────────────────── */
+.al-seletores-list { padding: 16px 22px 6px; display: flex; flex-direction: column; gap: 8px; }
+.al-seletor-row {
+  display: flex; align-items: center; gap: 10px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 9px; padding: 9px 13px;
+}
+.al-seletor-row.is-inactive { opacity: .5; }
+.al-seletor-label { flex: 1; font-size: 14px; }
+.al-drag-handle { cursor: grab; color: var(--text-faint); font-size: 15px; line-height: 1; user-select: none; letter-spacing: -2px; }
+.al-seletor-row.is-dragging { opacity: .4; }
+.al-seletor-row.drop-before { box-shadow: inset 0 3px 0 var(--accent); }
+.al-seletor-row.drop-after { box-shadow: inset 0 -3px 0 var(--accent); }
+.al-seletor-row__actions { display: flex; gap: 6px; }
+.al-seletor-add { display: flex; gap: 8px; padding: 12px 22px 8px; }
+.al-seletor-add input { flex: 1; }
+
+/* ── Regras do resumo (admin) ───────────────────────── */
+.al-regras-intro { padding: 14px 22px 0; margin: 0; color: var(--text-dim); font-size: 13px; line-height: 1.5; }
+.al-regras-intro em { color: var(--accent); font-style: normal; }
+.al-regras-list { padding: 14px 22px 6px; display: flex; flex-direction: column; gap: 8px; }
+.al-regra-row {
+  display: flex; align-items: center; gap: 12px;
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; padding: 10px 13px;
+}
+.al-regra-row__ord { display: flex; flex-direction: column; gap: 2px; }
+.al-regra-row__info { flex: 1; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.al-regra-row__info strong { font-size: 14px; }
+.al-regra-row__actions { display: flex; flex-direction: column; gap: 6px; }
+.al-icon-btn {
+  background: var(--surface-3); border: 1px solid var(--border); color: var(--text-dim);
+  width: 24px; height: 20px; border-radius: 5px; cursor: pointer; font-size: 9px; line-height: 1; padding: 0;
+}
+.al-icon-btn:hover:not(:disabled) { color: var(--text); border-color: var(--text-faint); }
+.al-icon-btn:disabled { opacity: .35; cursor: not-allowed; }
+.al-regra-form { padding: 8px 22px 18px; display: flex; flex-direction: column; gap: 14px; border-top: 1px solid var(--border); margin-top: 8px; }
+.al-regra-form .al-form__footer { padding: 0; }
+.al-regra-form-title { font-size: 13px; font-weight: 600; color: var(--accent); margin-top: 4px; }
+
+.al-loading { text-align: center; padding: 50px; color: var(--text-dim); }
+
+@media (max-width: 620px) {
+  #al-app { padding: 18px 16px 50px; }
+  .al-header { flex-wrap: wrap; }
+  .al-toolbar__actions .al-btn { flex: 1; }
+}

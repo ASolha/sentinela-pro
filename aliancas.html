@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Trocas — Sentinela Pro</title>
+  <link rel="stylesheet" href="aliancas.css" />
+</head>
+<body>
+  <div id="al-app">
+    <!-- Cabeçalho -->
+    <header class="al-header">
+      <div class="al-header__brand">
+        <div class="al-logo">◈</div>
+        <div>
+          <h1>Trocas</h1>
+          <p class="al-sub">Casos de troca, defeito e gravação</p>
+        </div>
+      </div>
+      <div class="al-header__user">
+        <span id="al-user-name" class="al-user-name">—</span>
+        <span id="al-conn" class="al-conn al-conn--off" title="Status da conexão"></span>
+      </div>
+    </header>
+
+    <!-- Barra de ações -->
+    <nav class="al-toolbar">
+      <div class="al-tabs">
+        <button class="al-tab is-active" data-view="ativos" type="button">Casos da semana</button>
+        <button class="al-tab" data-view="historico" type="button">Histórico</button>
+      </div>
+      <div class="al-toolbar__actions">
+        <button id="al-btn-novo" class="al-btn al-btn--primary" type="button">+ Adicionar caso</button>
+        <button id="al-btn-resumo" class="al-btn" type="button">Resumo</button>
+        <button id="al-btn-fechar" class="al-btn al-btn--ghost" type="button">Fechar semana</button>
+        <button id="al-btn-regras" class="al-btn al-btn--ghost al-admin-only" type="button" hidden>Regras do resumo</button>
+        <button id="al-btn-seletores" class="al-btn al-btn--ghost al-admin-only" type="button" hidden>Gerenciar seletores</button>
+      </div>
+    </nav>
+
+    <!-- Faixa de status/mensagens -->
+    <div id="al-status" class="al-status" hidden></div>
+
+    <!-- Contadores rápidos -->
+    <div id="al-counters" class="al-counters"></div>
+
+    <!-- Lista de casos ativos -->
+    <main id="al-view-ativos" class="al-view">
+      <div id="al-cards" class="al-cards"></div>
+      <div id="al-empty" class="al-empty" hidden>
+        <p>Nenhum caso nesta semana ainda.</p>
+      </div>
+    </main>
+
+    <!-- Histórico -->
+    <main id="al-view-historico" class="al-view" hidden>
+      <div id="al-historico" class="al-historico"></div>
+    </main>
+  </div>
+
+  <!-- Modal: novo/editar caso -->
+  <div id="al-modal" class="al-modal" hidden>
+    <div class="al-modal__backdrop" data-close="1"></div>
+    <div class="al-modal__box">
+      <div class="al-modal__head">
+        <h2 id="al-modal-title">Novo caso</h2>
+        <button class="al-modal__close" data-close="1" type="button">✕</button>
+      </div>
+      <form id="al-form" class="al-form">
+        <input type="hidden" id="al-form-id" />
+        <label class="al-field">
+          <span>Título <em>(opcional — ex.: nº da OS, nome, referência)</em></span>
+          <input type="text" id="al-form-titulo" maxlength="120" placeholder="Ex.: Aliança par — João / OS 1234" />
+        </label>
+
+        <div class="al-field">
+          <span>Classificações</span>
+          <div id="al-form-seletores" class="al-checks"></div>
+        </div>
+
+        <label class="al-field al-field--qtd">
+          <span>Quantidade de alianças</span>
+          <input type="number" id="al-form-qtd" min="1" step="1" value="1" />
+          <em class="al-hint">Par conta como 2. Avulsa, 1.</em>
+        </label>
+
+        <label class="al-field">
+          <span>Observação</span>
+          <textarea id="al-form-obs" rows="3" placeholder="Detalhes do caso, o que foi feito, pendências..."></textarea>
+        </label>
+
+        <div class="al-form__footer">
+          <button type="button" class="al-btn al-btn--ghost" data-close="1">Cancelar</button>
+          <button type="submit" class="al-btn al-btn--primary" id="al-form-save">Salvar caso</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Modal: resumo consolidado -->
+  <div id="al-modal-resumo" class="al-modal" hidden>
+    <div class="al-modal__backdrop" data-close="1"></div>
+    <div class="al-modal__box">
+      <div class="al-modal__head">
+        <h2>Resumo consolidado</h2>
+        <button class="al-modal__close" data-close="1" type="button">✕</button>
+      </div>
+      <div id="al-resumo-body" class="al-resumo"></div>
+      <div class="al-form__footer">
+        <button type="button" class="al-btn al-btn--ghost" data-close="1">Fechar</button>
+        <button type="button" class="al-btn al-btn--primary" id="al-resumo-copy">Copiar resumo</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: gerenciar seletores (admin) -->
+  <div id="al-modal-seletores" class="al-modal" hidden>
+    <div class="al-modal__backdrop" data-close="1"></div>
+    <div class="al-modal__box">
+      <div class="al-modal__head">
+        <h2>Gerenciar seletores</h2>
+        <button class="al-modal__close" data-close="1" type="button">✕</button>
+      </div>
+      <div id="al-seletores-list" class="al-seletores-list"></div>
+      <form id="al-seletor-form" class="al-seletor-add">
+        <input type="text" id="al-seletor-novo" maxlength="60" placeholder="Novo seletor (ex.: Sem gravação anterior)" />
+        <button type="submit" class="al-btn al-btn--primary">Adicionar</button>
+      </form>
+      <p class="al-hint">Seletores inativos não aparecem no formulário de novos casos, mas continuam nos casos antigos.</p>
+    </div>
+  </div>
+
+  <!-- Modal: regras do resumo (admin) -->
+  <div id="al-modal-regras" class="al-modal" hidden>
+    <div class="al-modal__backdrop" data-close="1"></div>
+    <div class="al-modal__box">
+      <div class="al-modal__head">
+        <h2>Regras do resumo</h2>
+        <button class="al-modal__close" data-close="1" type="button">✕</button>
+      </div>
+      <p class="al-regras-intro">
+        Cada regra transforma uma combinação de seletores num rótulo próprio no resumo.
+        Marque os seletores da combinação, escreva o rótulo (ex.: <em>Troca com Defeito</em>,
+        <em>Troca de Aro</em>) e ordene com as setas. As combinações sem regra aparecem
+        depois, no formato <em>A + B</em>, ordenadas por quantidade.
+      </p>
+      <div id="al-regras-list" class="al-regras-list"></div>
+      <form id="al-regra-form" class="al-regra-form">
+        <div id="al-regra-form-title" class="al-regra-form-title">Nova regra</div>
+        <div class="al-field">
+          <span>Seletores da combinação</span>
+          <div id="al-regra-seletores" class="al-checks"></div>
+        </div>
+        <label class="al-field">
+          <span>Rótulo exibido no resumo</span>
+          <input type="text" id="al-regra-label" maxlength="80" placeholder="Ex.: Troca com Defeito" />
+        </label>
+        <div class="al-form__footer">
+          <button type="button" id="al-regra-cancel" class="al-btn al-btn--ghost" hidden>Cancelar</button>
+          <button type="submit" id="al-regra-submit" class="al-btn al-btn--primary">Adicionar regra</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="aliancas.js"></script>
+</body>
+</html>

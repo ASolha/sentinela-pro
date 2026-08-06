@@ -408,6 +408,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }).catch(e => sendResponse({ success: false, error: e.message }));
     return true;
   }
+  if (message.action === 'openAliancas') {
+    const url = chrome.runtime.getURL('aliancas.html');
+    chrome.tabs.query({ url }, (tabs) => {
+      if (tabs && tabs.length) {
+        chrome.tabs.update(tabs[0].id, { active: true });
+        if (tabs[0].windowId != null) chrome.windows.update(tabs[0].windowId, { focused: true });
+        sendResponse({ success: true, reused: true });
+      } else {
+        chrome.tabs.create({ url, active: true }, () => sendResponse({ success: true, reused: false }));
+      }
+    });
+    return true;
+  }
 });
 
 // Debounce para evitar múltiplas queries simultâneas quando várias abas mudam de estado ao mesmo tempo

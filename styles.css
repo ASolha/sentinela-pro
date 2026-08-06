@@ -704,6 +704,27 @@
   box-shadow: 0 0 22px rgba(139, 92, 246, 0.45);
 }
 
+#sp-btn-aliancas {
+  background: rgba(249, 115, 22, 0.14);
+  border-color: rgba(249, 115, 22, 0.34);
+  color: #fdba74;
+}
+
+#sp-btn-aliancas:hover {
+  background: rgba(249, 115, 22, 0.26);
+  border-color: rgba(251, 146, 60, 0.72);
+  color: #fed7aa;
+  box-shadow: 0 0 18px rgba(249, 115, 22, 0.4), 0 3px 10px rgba(0, 0, 0, 0.35);
+  transform: translateY(-1px);
+}
+
+#sp-btn-aliancas.sp-active {
+  background: linear-gradient(180deg, rgba(234, 88, 12, 0.34) 0%, rgba(194, 65, 12, 0.28) 100%);
+  border-color: rgba(253, 186, 116, 0.82);
+  color: #fff7ed;
+  box-shadow: 0 0 22px rgba(249, 115, 22, 0.45);
+}
+
 .sp-gestor-badge {
   position: absolute;
   top: -4px;
@@ -2849,6 +2870,20 @@
   border-color: rgba(139, 92, 246, 0.5);
   background: linear-gradient(180deg, rgba(243, 232, 255, 0.98) 0%, rgba(233, 213, 255, 0.98) 100%);
   box-shadow: 0 10px 24px rgba(139, 92, 246, 0.2);
+}
+
+#sp-topbar.sp-theme-light #sp-btn-aliancas {
+  color: #c2410c;
+  border-color: rgba(249, 115, 22, 0.32);
+  background: rgba(255, 247, 237, 0.98);
+}
+
+#sp-topbar.sp-theme-light #sp-btn-aliancas:hover,
+#sp-topbar.sp-theme-light #sp-btn-aliancas.sp-active {
+  color: #9a3412;
+  border-color: rgba(249, 115, 22, 0.5);
+  background: linear-gradient(180deg, rgba(255, 237, 213, 0.98) 0%, rgba(254, 215, 170, 0.98) 100%);
+  box-shadow: 0 10px 24px rgba(249, 115, 22, 0.2);
 }
 
 #sp-topbar.sp-theme-light #sp-btn-auth {

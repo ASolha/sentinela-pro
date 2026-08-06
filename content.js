@@ -24,7 +24,7 @@ const ORDER_PICKER_TABLE = 'order_picker_history';
 const HUB_PROFILE_TABLE = 'hub_user_profiles';
 const HUB_SESSION_KEY = 'sp_hub_session';
 const HUB_BUTTON_ORDER_KEY = 'sp_hub_button_order';
-const HUB_DEFAULT_BUTTON_ORDER = ['passo', 'clip', 'counter', 'orders', 'history', 'gestor'];
+const HUB_DEFAULT_BUTTON_ORDER = ['passo', 'clip', 'counter', 'orders', 'history', 'gestor', 'aliancas'];
 const CUSTOMER_HISTORY_SESSION_KEY = 'sp_customer_history_state';
 const CUSTOMER_HISTORY_POSITION_KEY = 'sp_customer_history_pos';
 const GESTOR_CAPTURE_SESSION_KEY = 'sp_gestor_capture_state';
@@ -77,6 +77,8 @@ const GESTOR_CARD_STATUS_KEY = 'sp_gestor_card_status';
 const GESTOR_FEFRELLO_CONFIG_KEY = 'sp_gestor_fefrello_config';
 const GESTOR_FEFRELLO_CACHE_KEY = 'sp_gestor_fefrello_cache';
 const GESTOR_PANEL_POSITION_KEY = 'sp_gestor_panel_pos';
+const GESTOR_SYNC_KEY = 'sp_gestor_sync';
+const SP_TAB_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
 const DEFAULT_GESTOR_EMAIL_TO = 'brunosims@gmail.com';
 const GESTOR_FEFRELLO_API_BASE = 'https://southamerica-east1-fefrello.cloudfunctions.net';
 const GESTOR_FEFRELLO_API_KEY = '708a34771f2659594502ed4b74cd634819a297d37e3fb2fa3cafdf826c286f16';
@@ -1396,6 +1398,7 @@ async function createGestorPendencia(fields) {
     })
   });
 
+  signalGestorSync();
   return rows?.[0] || null;
 }
 
@@ -1410,13 +1413,35 @@ async function updateGestorPendencia(id, fields) {
       updated_at: new Date().toISOString()
     })
   });
+  signalGestorSync();
 }
 
 async function deleteGestorPendencia(id) {
   await sbFetch(`/rest/v1/pendencias?id=eq.${id}`, {
     method: 'DELETE'
   });
+  signalGestorSync();
 }
+
+// ── Sincronização entre abas do Gestor ──────────────────────────────────────
+// As pendências são por usuário, então basta avisar as outras abas do próprio
+// usuário quando algo muda (via chrome.storage, que é compartilhado entre abas).
+// Isso mantém todas as abas atualizadas ao vivo, sem WebSocket por página.
+function signalGestorSync() {
+  try {
+    chrome.storage.local.set({ [GESTOR_SYNC_KEY]: { ts: Date.now(), from: SP_TAB_ID } });
+  } catch (_) { /* ignore */ }
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes[GESTOR_SYNC_KEY]) return;
+  const val = changes[GESTOR_SYNC_KEY].newValue;
+  if (!val || val.from === SP_TAB_ID) return; // ignora o próprio sinal
+  if (!hasAuthSession()) return;
+  // só recarrega em abas onde o Gestor já foi aberto (o painel existe no DOM)
+  if (!document.getElementById('sp-gestor-panel')) return;
+  loadGestorPendencias();
+});
 
 function createTopBar() {
   if (document.getElementById('sp-topbar')) return;
@@ -1494,6 +1519,13 @@ function createTopBar() {
     <path d="m9 17 2 2 4-4"/>
   </svg>`;
 
+  // ícone Trocas (aliança na lupa)
+  const iconAliancas = `<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <circle cx="10.5" cy="10.5" r="6"/>
+    <circle cx="10.5" cy="10.5" r="2.5"/>
+    <path d="M15 15 20 20"/>
+  </svg>`;
+
   bar.innerHTML = `
     <button id="sp-btn-passo"   class="sp-btn" title="Mensagem Rápida (Alt+M)">${iconPasso}</button>
     <div class="sp-sep"></div>
@@ -1516,6 +1548,10 @@ function createTopBar() {
       <span class="sp-gestor-badge" id="sp-gestor-badge"></span>
     </button>
     <div class="sp-sep"></div>
+    <button id="sp-btn-aliancas" class="sp-btn" title="Trocas (Alt+A)">
+      ${iconAliancas}
+    </button>
+    <div class="sp-sep"></div>
     <button id="sp-btn-auth" class="sp-btn" title="Conta do Hub (Alt+U)">
       ${iconAccount}
       <span class="sp-auth-badge" id="sp-auth-badge"></span>
@@ -1529,6 +1565,7 @@ function createTopBar() {
   const btnOrders  = bar.querySelector('#sp-btn-orders');
   const btnHistory = bar.querySelector('#sp-btn-history');
   const btnGestor  = bar.querySelector('#sp-btn-gestor');
+  const btnAliancas = bar.querySelector('#sp-btn-aliancas');
   const btnAuth    = bar.querySelector('#sp-btn-auth');
 
   function animateCounterRefreshButton() {
@@ -1600,6 +1637,14 @@ function createTopBar() {
     toggleGestorPanel();
   });
 
+  btnAliancas?.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ action: 'openAliancas' }, () => {
+      if (chrome.runtime.lastError) {
+        mostrarNotificacao('Não foi possível abrir Trocas.', 'error');
+      }
+    });
+  });
+
   btnAuth?.addEventListener('click', () => {
     toggleAuthPanel();
   });
@@ -1626,6 +1671,9 @@ function createTopBar() {
     } else if ((e.key === 'g' || e.key === 'G') && btnGestor) {
       e.preventDefault();
       btnGestor.click();
+    } else if ((e.key === 'a' || e.key === 'A') && btnAliancas) {
+      e.preventDefault();
+      btnAliancas.click();
     } else if ((e.key === 'u' || e.key === 'U') && btnAuth) {
       e.preventDefault();
       btnAuth.click();
@@ -1715,6 +1763,7 @@ function renderTopBarLayout(bar, order = HUB_DEFAULT_BUTTON_ORDER) {
     orders: { id: 'sp-btn-orders', label: 'Pedidos' },
     history: { id: 'sp-btn-history', label: 'Recompra' },
     gestor: { id: 'sp-btn-gestor', label: 'Pendências' },
+    aliancas: { id: 'sp-btn-aliancas', label: 'Trocas' },
     auth: { id: 'sp-btn-auth', label: 'Conta' },
   };
 
