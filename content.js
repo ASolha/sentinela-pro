@@ -79,6 +79,7 @@ const GESTOR_FEFRELLO_CACHE_KEY = 'sp_gestor_fefrello_cache';
 const GESTOR_PANEL_POSITION_KEY = 'sp_gestor_panel_pos';
 const GESTOR_SYNC_KEY = 'sp_gestor_sync';
 const SP_TAB_ID = Math.random().toString(36).slice(2) + Date.now().toString(36);
+let gestorSyncDirty = false;
 const DEFAULT_GESTOR_EMAIL_TO = 'brunosims@gmail.com';
 const GESTOR_FEFRELLO_API_BASE = 'https://southamerica-east1-fefrello.cloudfunctions.net';
 const GESTOR_FEFRELLO_API_KEY = '708a34771f2659594502ed4b74cd634819a297d37e3fb2fa3cafdf826c286f16';
@@ -1433,14 +1434,30 @@ function signalGestorSync() {
   } catch (_) { /* ignore */ }
 }
 
+// Atualiza o Gestor só se a aba estiver visível; abas em segundo plano ficam
+// marcadas como "sujas" e atualizam quando ganharem foco. Evita dezenas de
+// requisições simultâneas quando há muitas abas abertas.
+function requestGestorRefresh() {
+  if (!hasAuthSession()) return;
+  if (document.visibilityState === 'visible') {
+    gestorSyncDirty = false;
+    Promise.resolve(loadGestorPendencias()).catch(() => {});
+  } else {
+    gestorSyncDirty = true;
+  }
+}
+
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local' || !changes[GESTOR_SYNC_KEY]) return;
   const val = changes[GESTOR_SYNC_KEY].newValue;
   if (!val || val.from === SP_TAB_ID) return; // ignora o próprio sinal
-  if (!hasAuthSession()) return;
-  // só recarrega em abas onde o Gestor já foi aberto (o painel existe no DOM)
-  if (!document.getElementById('sp-gestor-panel')) return;
-  loadGestorPendencias();
+  requestGestorRefresh();
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible' && gestorSyncDirty) {
+    requestGestorRefresh();
+  }
 });
 
 function createTopBar() {
@@ -6866,7 +6883,9 @@ document.addEventListener('sp:auth-changed', async () => {
 
     try {
       await loadGestorLocalState();
-      await loadGestorPendencias();
+      // Em abas em segundo plano, adia a busca das pendências até a aba ganhar
+      // foco — evita dezenas de requisições ao abrir muitas abas de uma vez.
+      requestGestorRefresh();
     } catch (error) {
       console.warn('[Sentinela Pro] Falha ao carregar Gestor:', error instanceof Error ? error.message : error);
     }
