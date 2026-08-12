@@ -1550,6 +1550,7 @@ function createTopBar() {
     <div class="sp-sep"></div>
     <button id="sp-btn-counter" class="sp-btn" title="Abas ML de pedidos e mensagens abertas - clique para recarregar (Alt+R)">
       ${iconCounter}
+      <span class="sp-counter-position-badge" id="sp-counter-position-badge"></span>
       <span class="sp-counter-badge" id="sp-counter-badge"></span>
     </button>
     <div class="sp-sep"></div>
@@ -1699,7 +1700,7 @@ function createTopBar() {
 
   // Busca contagem inicial ao criar a barra
   chrome.runtime.sendMessage({ action: 'getTabCount' }, (r) => {
-    if (r) updateCounterBadge(r.count);
+    if (r) updateCounterBadge(r.count, r.position);
   });
   syncGestorButton();
   syncAuthButton();
@@ -1833,15 +1834,29 @@ function upgradeTopBarLayout(bar) {
   });
 }
 
-function updateCounterBadge(count) {
-  const badge = document.getElementById('sp-counter-badge');
-  const btn   = document.getElementById('sp-btn-counter');
+function updateCounterBadge(count, position = 0) {
+  const badge    = document.getElementById('sp-counter-badge');
+  const posBadge = document.getElementById('sp-counter-position-badge');
+  const btn      = document.getElementById('sp-btn-counter');
   if (!badge) return;
+
   badge.textContent = count > 0 ? count : '';
   badge.dataset.count = count;
-  if (btn) btn.title = count > 0
-    ? `${count} aba${count !== 1 ? 's' : ''} ML de pedidos ou mensagens aberta${count !== 1 ? 's' : ''} — clique para recarregar todas`
-    : 'Nenhuma aba ML com URL de pedido ou mensagens aberta';
+
+  if (posBadge) {
+    posBadge.textContent = position > 0 ? position : '';
+    posBadge.dataset.count = position;
+  }
+
+  if (btn) {
+    if (count > 0 && position > 0) {
+      btn.title = `Esta é a aba ${position} de ${count} aba${count !== 1 ? 's' : ''} ML de pedidos ou mensagens — clique para recarregar todas`;
+    } else if (count > 0) {
+      btn.title = `${count} aba${count !== 1 ? 's' : ''} ML de pedidos ou mensagens aberta${count !== 1 ? 's' : ''} — clique para recarregar todas`;
+    } else {
+      btn.title = 'Nenhuma aba ML com URL de pedido ou mensagens aberta';
+    }
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -8209,7 +8224,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   // Ranger Counter — atualiza badge do botão na top bar
   if (message.action === 'tabCountUpdate') {
-    updateCounterBadge(message.count);
+    updateCounterBadge(message.count, message.position);
     return;
   }
 });

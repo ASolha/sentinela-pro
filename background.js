@@ -368,9 +368,15 @@ function isTabRelevant(tab) {
   return isRelevantMercadoLivreTab(tab.url) || isRelevantMercadoLivreTab(tab.pendingUrl);
 }
 
-async function countRelevantTabs() {
-  const tabs = await chrome.tabs.query({});
-  return tabs.filter(isTabRelevant).length;
+// Abas relevantes ordenadas da esquerda para a direita (por janela e posição),
+// para que a numeração por aba acompanhe a ordem visual no navegador.
+function getRelevantTabsSorted(tabs) {
+  return tabs
+    .filter(isTabRelevant)
+    .sort((a, b) => {
+      if (a.windowId !== b.windowId) return (a.windowId || 0) - (b.windowId || 0);
+      return (a.index || 0) - (b.index || 0);
+    });
 }
 
 async function refreshAllMLTabs() {
@@ -383,14 +389,23 @@ async function refreshAllMLTabs() {
 async function updateBadgeAndNotify() {
   // Uma única query para contar e transmitir — evita dessincronização entre dois awaits
   const tabs = await chrome.tabs.query({});
-  const count = tabs.filter(isTabRelevant).length;
+  const relevant = getRelevantTabsSorted(tabs);
+  const count = relevant.length;
+
+  // Mapa aba → posição (1..N) na ordem visual das abas relevantes.
+  const positionByTabId = new Map();
+  relevant.forEach((tab, i) => positionByTabId.set(tab.id, i + 1));
 
   chrome.action.setBadgeText({ text: '' });
   chrome.action.setTitle({ title: 'Sentinela Pro' });
 
   tabs.forEach(tab => {
     if (tab.url && (tab.url.includes('mercadolivre.com.br') || tab.url.includes('mercadolibre.com'))) {
-      chrome.tabs.sendMessage(tab.id, { action: 'tabCountUpdate', count }).catch(() => {});
+      chrome.tabs.sendMessage(tab.id, {
+        action: 'tabCountUpdate',
+        count,
+        position: positionByTabId.get(tab.id) || 0
+      }).catch(() => {});
     }
   });
 }
@@ -398,7 +413,12 @@ async function updateBadgeAndNotify() {
 // Handlers de getTabCount e refreshAllTabs
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.action === 'getTabCount') {
-    countRelevantTabs().then(count => sendResponse({ count }));
+    chrome.tabs.query({}).then(tabs => {
+      const relevant = getRelevantTabsSorted(tabs);
+      const senderId = sender?.tab?.id;
+      const idx = senderId != null ? relevant.findIndex(t => t.id === senderId) : -1;
+      sendResponse({ count: relevant.length, position: idx >= 0 ? idx + 1 : 0 });
+    });
     return true;
   }
   if (message.action === 'refreshAllTabs') {

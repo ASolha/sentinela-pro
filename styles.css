@@ -612,6 +612,32 @@
   display: none;
 }
 
+/* Badge da posição desta aba (1..N) — canto oposto, cor distinta do total */
+.sp-counter-position-badge {
+  position: absolute;
+  top: -4px;
+  left: -4px;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  background: #3b82f6;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 3px;
+  border: 1.5px solid rgba(13, 17, 35, 0.97);
+  pointer-events: none;
+  transition: transform 0.2s ease;
+}
+.sp-counter-position-badge:empty,
+.sp-counter-position-badge[data-count="0"] {
+  display: none;
+}
+
 /* ── Clip light theme ─────────────────────────────────────── */
 
 #sp-btn-orders {
@@ -2907,6 +2933,7 @@
 }
 
 #sp-topbar.sp-theme-light .sp-counter-badge,
+#sp-topbar.sp-theme-light .sp-counter-position-badge,
 #sp-topbar.sp-theme-light .sp-history-badge,
 #sp-topbar.sp-theme-light .sp-gestor-badge,
 #sp-topbar.sp-theme-light .sp-auth-badge {
