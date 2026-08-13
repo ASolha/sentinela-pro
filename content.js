@@ -2467,6 +2467,7 @@ function renderGestorPanelContent(panel) {
           ${renderGestorLabelPicker('')}
           <div class="sp-gestor-form__actions">
             <button type="button" id="sp-gestor-cancel" class="sp-gestor-action">Cancelar</button>
+            <button type="button" id="sp-gestor-create-email" class="sp-gestor-action sp-gestor-action--mail">Enviar E-mail</button>
             <button type="button" id="sp-gestor-save-fefrello" class="sp-gestor-action sp-gestor-action--success">Fefrello</button>
             <button type="submit" id="sp-gestor-save" class="sp-gestor-action sp-gestor-action--primary">Salvar</button>
           </div>
@@ -2604,6 +2605,7 @@ function bindGestorPanelEvents(panel) {
     panel.querySelector('#sp-gestor-form')?.classList.add('sp-hidden');
   });
 
+  panel.querySelector('#sp-gestor-create-email')?.addEventListener('click', onGestorCreateAndSendEmail);
   panel.querySelector('#sp-gestor-save-fefrello')?.addEventListener('click', onGestorCreateAndSendToFefrello);
   panel.querySelector('#sp-gestor-save-email')?.addEventListener('click', onGestorSaveEmailSettings);
   panel.querySelector('#sp-gestor-fefrello-save')?.addEventListener('click', onGestorSaveFefrelloSettings);
@@ -2878,7 +2880,7 @@ function resetGestorCreateForm(panel) {
   panel.querySelector('#sp-gestor-form')?.classList.add('sp-hidden');
 }
 
-async function submitGestorCreate({ sendToFefrello = false } = {}) {
+async function submitGestorCreate({ sendToFefrello = false, sendEmailAndArchive = false } = {}) {
   const panel = createGestorPanel();
   const { fields } = collectGestorCreateDraft(panel);
   const login = fields.login_cliente;
@@ -2908,11 +2910,27 @@ async function submitGestorCreate({ sendToFefrello = false } = {}) {
     }
   }
 
+  if (sendEmailAndArchive && !normalizeGestorEmailSettings(gestorEmailSettings).emailTo) {
+    gestorCurrentTab = 'ajustes';
+    renderGestorPanelContent(createGestorPanel());
+    setGestorStatus('Defina o destinatário nos Ajustes antes de enviar.', 'error');
+    return;
+  }
+
   const saveButton = panel.querySelector('#sp-gestor-save');
   const fefrelloButton = panel.querySelector('#sp-gestor-save-fefrello');
+  const emailButton = panel.querySelector('#sp-gestor-create-email');
   if (saveButton) saveButton.disabled = true;
   if (fefrelloButton) fefrelloButton.disabled = true;
-  setGestorStatus(sendToFefrello ? 'Criando card no Fefrello e salvando pendência...' : 'Salvando pendência...', 'info');
+  if (emailButton) emailButton.disabled = true;
+  setGestorStatus(
+    sendEmailAndArchive
+      ? 'Enviando e-mail e arquivando pendência...'
+      : sendToFefrello
+        ? 'Criando card no Fefrello e salvando pendência...'
+        : 'Salvando pendência...',
+    'info'
+  );
 
   try {
     if (sendToFefrello) {
@@ -2933,16 +2951,33 @@ async function submitGestorCreate({ sendToFefrello = false } = {}) {
       await saveGestorCardStatus();
     }
 
+    if (sendEmailAndArchive) {
+      const date = new Date().toLocaleDateString('pt-BR');
+      const subject = buildGestorEmailSubject(fields.login_cliente, date, fields.etiquetas);
+      await sendGestorEmail(subject, buildGestorSingleEmailHtml(created || fields, date));
+      if (created?.id) {
+        gestorEmailSentIds.add(String(created.id));
+        await updateGestorPendencia(created.id, { is_archived: true, archived_at: new Date().toISOString() });
+        await saveGestorCardStatus();
+      }
+    }
+
     gestorCurrentTab = 'pendencias';
     resetGestorCreateForm(panel);
     await loadGestorPendencias();
     resetGestorCreateForm(createGestorPanel());
-    setGestorStatus(sendToFefrello ? 'Pendência salva e enviada ao Fefrello.' : 'Pendência criada com sucesso.', 'success');
+    if (sendEmailAndArchive) {
+      setGestorStatus('E-mail enviado e pendência arquivada.', 'success');
+      mostrarNotificacao('E-mail enviado e pendência arquivada. ✓', 'success');
+    } else {
+      setGestorStatus(sendToFefrello ? 'Pendência salva e enviada ao Fefrello.' : 'Pendência criada com sucesso.', 'success');
+    }
   } catch (error) {
     setGestorStatus(error instanceof Error ? error.message : String(error), 'error');
   } finally {
     if (saveButton) saveButton.disabled = false;
     if (fefrelloButton) fefrelloButton.disabled = false;
+    if (emailButton) emailButton.disabled = false;
   }
 }
 
@@ -2955,6 +2990,12 @@ async function onGestorCreateAndSendToFefrello(event) {
   event.preventDefault();
   event.stopPropagation();
   await submitGestorCreate({ sendToFefrello: true });
+}
+
+async function onGestorCreateAndSendEmail(event) {
+  event.preventDefault();
+  event.stopPropagation();
+  await submitGestorCreate({ sendEmailAndArchive: true });
 }
 
 async function onGestorSaveEmailSettings() {
