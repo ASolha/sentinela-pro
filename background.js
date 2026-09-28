@@ -7,6 +7,8 @@ let processedElements = new Set();
 const GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.send'];
 const CUSTOMER_HISTORY_CACHE_TTL = 5 * 60 * 1000;
 const CUSTOMER_HISTORY_LOOKUP_CONCURRENCY = 2;
+// Esperas entre tentativas quando a aba ainda não tem content script ouvindo.
+const CUSTOMER_HISTORY_TAB_RETRY_DELAYS = [700, 1500, 3000];
 const customerHistoryCache = new Map();
 const customerHistoryPending = new Map();
 const customerHistoryQueue = [];
@@ -238,30 +240,72 @@ async function processCustomerHistoryLookup(login) {
       results: []
     });
   } finally {
-    customerHistoryPending.delete(login);
+    // Se a aba fechou no meio, o onRemoved já pode ter trocado a entrada deste login por outra.
+    if (customerHistoryPending.get(login) === entry) customerHistoryPending.delete(login);
     activeCustomerHistoryLookups = Math.max(0, activeCustomerHistoryLookups - 1);
     drainCustomerHistoryQueue();
+  }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Não havia content script ouvindo na aba: ela estava recarregando ou sendo
+// redirecionada (ex.: www.mercadolivre.com.br → vendedores.mercadolivre.com.br).
+function isTabConnectionError(error) {
+  const message = error instanceof Error ? error.message : String(error || '');
+  return /receiving end does not exist|could not establish connection|message (port|channel) closed|back\/forward cache/i.test(message);
+}
+
+// Espera a aba terminar de carregar. false = aba fechada ou descartada.
+async function waitForTabComplete(tabId, timeoutMs = 8000) {
+  const deadline = Date.now() + timeoutMs;
+
+  while (true) {
+    let tab;
+    try {
+      tab = await chrome.tabs.get(tabId);
+    } catch {
+      return false;
+    }
+
+    if (tab.discarded) return false;
+    if (tab.status === 'complete' || Date.now() >= deadline) return true;
+    await delay(250);
   }
 }
 
 async function runCustomerHistoryLookup(entry) {
   let lastError = new Error('Nenhuma aba disponivel para consultar recompra.');
 
-  for (const request of entry.requests.values()) {
-    try {
-      const response = await chrome.tabs.sendMessage(request.tabId, {
-        action: 'run_customer_history_lookup',
-        login: entry.originalLogin || entry.login
-      });
+  for (let attempt = 0; ; attempt += 1) {
+    let tabWasLoading = false;
 
-      if (response?.ok) {
-        return decodeCustomerHistoryResults(response.results);
+    // Relê as requisições a cada volta: a aba que recarregou reenfileira com
+    // requestId novo, e abas fechadas saem da lista.
+    for (const request of Array.from(entry.requests.values())) {
+      if (attempt > 0 && !(await waitForTabComplete(request.tabId))) continue;
+
+      try {
+        const response = await chrome.tabs.sendMessage(request.tabId, {
+          action: 'run_customer_history_lookup',
+          login: entry.originalLogin || entry.login
+        });
+
+        if (response?.ok) {
+          return decodeCustomerHistoryResults(response.results);
+        }
+
+        lastError = new Error(response?.error || 'A aba nao conseguiu consultar os pedidos anteriores.');
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error || 'Falha na aba de consulta.'));
+        if (isTabConnectionError(lastError)) tabWasLoading = true;
       }
-
-      lastError = new Error(response?.error || 'A aba nao conseguiu consultar os pedidos anteriores.');
-    } catch (error) {
-      lastError = error instanceof Error ? error : new Error(String(error || 'Falha na aba de consulta.'));
     }
+
+    if (!tabWasLoading || attempt >= CUSTOMER_HISTORY_TAB_RETRY_DELAYS.length) break;
+    await delay(CUSTOMER_HISTORY_TAB_RETRY_DELAYS[attempt]);
   }
 
   throw lastError;
@@ -348,6 +392,7 @@ function isRelevantMercadoLivreTab(urlString) {
 
   try {
     const url = new URL(urlString);
+    // includes() cobre qualquer subdomínio (www., vendedores., ...)
     const isMLHost = (
       url.hostname.includes('mercadolivre.com.br') ||
       url.hostname.includes('mercadolibre.com')
@@ -356,8 +401,8 @@ function isRelevantMercadoLivreTab(urlString) {
 
     const pathname = url.pathname.replace(/\/+$/, '');
     return (
-      /^\/vendas\/\d+\/detalhe$/i.test(pathname) ||
-      /^\/vendas\/novo\/mensagens\/\d+$/i.test(pathname)
+      /\/vendas\/\d+\/detalhe$/i.test(pathname) ||
+      /\/vendas\/novo\/mensagens\/\d+$/i.test(pathname)
     );
   } catch {
     return false;

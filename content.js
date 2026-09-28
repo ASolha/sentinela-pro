@@ -64,6 +64,10 @@ let orderPickerTodaySequence = [];
 let hubProfilesCache = {};
 let hubProfilesLoaded = false;
 let customerHistoryLookupSequence = 0;
+// O estado da recompra fica no sessionStorage e sobrevive a recarregar/redirecionar a aba;
+// estes conjuntos valem só para a página atual.
+const customerHistoryOwnRequestIds = new Set();
+const customerHistoryLocalLookupIds = new Set();
 let authDisplayNameEditing = false;
 
 const GESTOR_IGNORE_MODEL_TERMS = [
@@ -3616,12 +3620,31 @@ async function onGestorClearArchivedAction() {
   }
 }
 
-function isOrderPickerSupportedPage() {
-  const isMercadoLivre =
-    window.location.hostname.includes('mercadolivre.com.br') ||
-    window.location.hostname.includes('mercadolibre.com');
+// ══════════════════════════════════════════════════════════════
+// URLs DO MERCADO LIVRE
+// O painel de vendas saiu de www.mercadolivre.com.br e passou para
+// vendedores.mercadolivre.com.br. Nada aqui fixa o subdomínio: as URLs são
+// montadas a partir da página atual, no mesmo host e prefixo em que o ML a serve.
+// ══════════════════════════════════════════════════════════════
 
-  return isMercadoLivre && /^\/vendas(\/|$)/.test(window.location.pathname);
+function isMercadoLivreHost(hostname = window.location.hostname) {
+  const host = String(hostname || '').toLowerCase();
+  return host.includes('mercadolivre.com.br') || host.includes('mercadolibre.com');
+}
+
+// Trecho do caminho antes de "/vendas" ('' em /vendas/...).
+function getMercadoLivreSalesBasePath(pathname = window.location.pathname) {
+  const match = String(pathname || '').match(/^(.*?)\/vendas(?:\/|$)/i);
+  return match ? match[1] : '';
+}
+
+function getMercadoLivreSalesBaseUrl() {
+  return `${window.location.origin}${getMercadoLivreSalesBasePath()}/vendas`;
+}
+
+function isOrderPickerSupportedPage() {
+  if (!isMercadoLivreHost()) return false;
+  return /\/vendas(\/|$)/i.test(window.location.pathname) || getOrderRowsForPicker().length > 0;
 }
 
 function getOrderRowsForPicker() {
@@ -3650,7 +3673,24 @@ function getOrderCheckbox(row) {
 
 function getOrderDetailUrl(orderId) {
   const callbackUrl = encodeURIComponent(window.location.href);
-  return `${window.location.origin}/vendas/${orderId}/detalhe?callbackUrl=${callbackUrl}`;
+  return `${getMercadoLivreSalesBaseUrl()}/${orderId}/detalhe?callbackUrl=${callbackUrl}`;
+}
+
+// Link de detalhe que o próprio ML renderiza na linha (já aponta para o host certo).
+function getOrderDetailUrlFromPickerRow(row, orderId) {
+  const sale = normalizeOrderPickerSaleNumber(orderId);
+  if (!row || !sale) return '';
+
+  for (const anchor of row.querySelectorAll('a[href*="/detalhe"]')) {
+    try {
+      const url = new URL(anchor.getAttribute('href') || '', window.location.href);
+      if (isMercadoLivreHost(url.hostname) && url.pathname.includes(`/vendas/${sale}/detalhe`)) return url.href;
+    } catch (_) {
+      // href inválido: tenta o próximo
+    }
+  }
+
+  return '';
 }
 
 function selectOrderCheckbox(checkbox) {
@@ -3701,7 +3741,7 @@ function collectOrdersFromBottom(quantity) {
       orderId,
       numeroVenda: orderId,
       loginCliente: getOrderBuyerLoginFromPickerRow(row),
-      url: getOrderDetailUrl(orderId)
+      url: getOrderDetailUrlFromPickerRow(row, orderId) || getOrderDetailUrl(orderId)
     });
   }
 
@@ -4869,11 +4909,7 @@ function getCustomerHistoryRequestKey(login, saleNumber) {
 }
 
 function isCustomerHistoryMessagePage() {
-  const isMercadoLivre =
-    window.location.hostname.includes('mercadolivre.com.br') ||
-    window.location.hostname.includes('mercadolibre.com');
-
-  return isMercadoLivre && /\/vendas\/novo\/mensagens\/\d+/i.test(window.location.pathname);
+  return isMercadoLivreHost() && /\/vendas\/novo\/mensagens\/\d+/i.test(window.location.pathname);
 }
 
 function extractCurrentCustomerHistorySaleNumberFromPage() {
@@ -5202,10 +5238,38 @@ function parseCustomerHistorySearchResults(html, targetLogin = '') {
 }
 
 function buildCustomerHistorySearchUrl(login) {
-  return `${window.location.origin}/vendas/omni/lista?filters=&subFilters=&search=${encodeURIComponent(login)}&limit=50&offset=0`;
+  return `${getMercadoLivreSalesBaseUrl()}/omni/lista?filters=&subFilters=&search=${encodeURIComponent(login)}&limit=50&offset=0`;
 }
 
-function performCustomerHistoryLookup(login) {
+// Busca direta na mesma origem, com os cookies da sessão. Não depende de a
+// lista de vendas aceitar ser aberta em iframe no domínio novo.
+async function fetchCustomerHistorySearchResults(url, login) {
+  const controller = new AbortController();
+  const timeoutTimer = setTimeout(() => controller.abort(), 8000);
+
+  try {
+    const response = await fetch(url, { credentials: 'include', signal: controller.signal });
+    if (!response.ok) return [];
+    return parseCustomerHistorySearchResults(await response.text(), login);
+  } finally {
+    clearTimeout(timeoutTimer);
+  }
+}
+
+async function performCustomerHistoryLookup(login) {
+  const url = buildCustomerHistorySearchUrl(login);
+
+  try {
+    const results = await fetchCustomerHistorySearchResults(url, login);
+    if (results.length) return results;
+  } catch (error) {
+    console.warn('[Sentinela Pro] Busca direta da recompra falhou, tentando pelo iframe:', error instanceof Error ? error.message : error);
+  }
+
+  return performCustomerHistoryLookupInFrame(url, login);
+}
+
+function performCustomerHistoryLookupInFrame(url, login) {
   return new Promise((resolve, reject) => {
     const iframe = document.createElement('iframe');
     let pollTimer = null;
@@ -5270,7 +5334,7 @@ function performCustomerHistoryLookup(login) {
     }, 12000);
 
     document.documentElement.appendChild(iframe);
-    iframe.src = buildCustomerHistorySearchUrl(login);
+    iframe.src = url;
   });
 }
 
@@ -5474,10 +5538,11 @@ async function toggleCustomerHistoryOverlay() {
 
   const noData = !state.login || !state.saleNumber;
   const hadNoResults = state.status === 'loaded' && state.previousOrders.length === 0;
+  const hadError = state.status === 'error';
 
-  if ((noData || hadNoResults) && context) {
-    // Re-busca forçada quando resultado anterior foi vazio (retry ao clicar novamente)
-    state = await queueCustomerHistoryLookup({ force: hadNoResults });
+  if ((noData || hadNoResults || hadError) && context) {
+    // Re-busca forçada quando o resultado anterior foi vazio ou deu erro (retry ao clicar novamente)
+    state = await queueCustomerHistoryLookup({ force: hadNoResults || hadError });
   }
 
   if (!state.login || !state.saleNumber) {
@@ -5504,7 +5569,12 @@ async function queueCustomerHistoryLookup(options = {}) {
   const currentState = loadCustomerHistoryState();
   const requestKey = getCustomerHistoryRequestKey(context.login, context.saleNumber);
 
-  const isStaleLoading = currentState.status === 'loading' && (Date.now() - (currentState.updatedAt || 0)) > 45_000;
+  // Um "loading" deixado por outra página (a aba recarregou ou foi redirecionada no meio
+  // da consulta) nunca vai ser respondido aqui: trata como vencido e reenvia.
+  const isStaleLoading = currentState.status === 'loading' && (
+    !customerHistoryOwnRequestIds.has(currentState.requestId) ||
+    (Date.now() - (currentState.updatedAt || 0)) > 45_000
+  );
   if (!force && !isStaleLoading && currentState.requestKey === requestKey && (currentState.status === 'loading' || currentState.status === 'loaded')) {
     syncCustomerHistoryPersistentNotification(currentState);
     syncCustomerHistoryButton();
@@ -5512,6 +5582,7 @@ async function queueCustomerHistoryLookup(options = {}) {
   }
 
   const requestId = `${Date.now()}_${++customerHistoryLookupSequence}`;
+  customerHistoryOwnRequestIds.add(requestId);
   const nextState = saveCustomerHistoryState({
     login: context.login,
     saleNumber: context.saleNumber,
@@ -5529,23 +5600,16 @@ async function queueCustomerHistoryLookup(options = {}) {
   syncCustomerHistoryButton();
 
   try {
-    await chrome.runtime.sendMessage({
+    const response = await chrome.runtime.sendMessage({
       action: 'enqueueCustomerHistoryLookup',
       login: context.login,
       saleNumber: context.saleNumber,
       requestId
     });
+    if (!response?.ok) throw new Error(response?.error || 'A consulta de recompra não entrou na fila.');
   } catch (error) {
-    const failedState = saveCustomerHistoryState({
-      requestId,
-      requestKey,
-      status: 'error',
-      error: error instanceof Error ? error.message : 'Não foi possível iniciar a consulta de recompra.',
-      updatedAt: Date.now()
-    });
-    syncCustomerHistoryPersistentNotification(failedState);
-    syncCustomerHistoryButton();
-    return failedState;
+    console.warn('[Sentinela Pro] Fila da recompra indisponível, consultando nesta aba:', error instanceof Error ? error.message : error);
+    void runCustomerHistoryLookupLocally(requestId);
   }
 
   if (document.getElementById('sp-customer-history-overlay')) {
@@ -5555,13 +5619,47 @@ async function queueCustomerHistoryLookup(options = {}) {
   return nextState;
 }
 
-function applyCustomerHistoryLookupResult(message) {
+// Erros do Chrome quando o background não achou content script ouvindo na aba:
+// ela estava recarregando ou foi redirecionada (ex.: www → vendedores.mercadolivre.com.br).
+function isCustomerHistoryConnectionError(error) {
+  const text = error instanceof Error ? error.message : String(error || '');
+  return /receiving end does not exist|could not establish connection|message (port|channel) closed|back\/forward cache/i.test(text);
+}
+
+// Consulta feita pela própria aba, sem a fila do background.
+async function runCustomerHistoryLookupLocally(requestId) {
+  const state = loadCustomerHistoryState();
+  if (!state.login || state.requestId !== requestId) return state;
+
+  customerHistoryLocalLookupIds.add(requestId);
+  let result;
+  try {
+    result = { requestId, saleNumber: state.saleNumber, results: await performCustomerHistoryLookup(state.login) };
+  } catch (error) {
+    result = { requestId, saleNumber: state.saleNumber, error: error instanceof Error ? error.message : String(error || 'Falha ao consultar recompra.') };
+  }
+
+  return applyCustomerHistoryLookupResult(result, { fromLocalLookup: true });
+}
+
+function applyCustomerHistoryLookupResult(message, options = {}) {
+  const { fromLocalLookup = false } = options;
   const state = loadCustomerHistoryState();
   const requestId = String(message.requestId || '').trim();
 
   if (!requestId || requestId !== state.requestId) return;
 
   if (message.error) {
+    // Erro atrasado do background não apaga resultado já obtido nem atropela a consulta local.
+    if (!fromLocalLookup && (state.status === 'loaded' || customerHistoryLocalLookupIds.has(requestId))) return state;
+
+    // O background não alcançou esta aba, mas ela está viva (recebeu esta mensagem):
+    // faz a consulta aqui mesmo em vez de mostrar o erro do Chrome.
+    if (!fromLocalLookup && isCustomerHistoryConnectionError(message.error)) {
+      void runCustomerHistoryLookupLocally(requestId);
+      return state;
+    }
+
     const failedState = saveCustomerHistoryState({
       status: 'error',
       error: String(message.error || 'Não foi possível consultar pedidos anteriores.'),
@@ -5700,18 +5798,11 @@ function stopMonitoring() {
 }
 
 function isOrderDetailMonitoringPage() {
-  const isMercadoLivre =
-    window.location.hostname.includes('mercadolivre.com.br') ||
-    window.location.hostname.includes('mercadolibre.com');
-
-  return isMercadoLivre && /\/vendas\/\d+\/detalhe/i.test(window.location.pathname);
+  return isMercadoLivreHost() && /\/vendas\/\d+\/detalhe/i.test(window.location.pathname);
 }
 
 function isOrderListPage() {
-  const isMercadoLivre =
-    window.location.hostname.includes('mercadolivre.com.br') ||
-    window.location.hostname.includes('mercadolibre.com');
-  return isMercadoLivre && /\/vendas(\/omni)?\/lista/i.test(window.location.pathname);
+  return isMercadoLivreHost() && /\/vendas(\/omni)?\/lista/i.test(window.location.pathname);
 }
 
 function scanListPageModoMensagem() {
@@ -6104,7 +6195,7 @@ function makeElementDraggable(elementToDrag, handleElement) {
 }
 
 function showPersistentNotification(cases) {
-  if (window.location.href.startsWith('https://www.mercadolivre.com.br/vendas/omni/lista')) return;
+  if (isOrderListPage()) return;
   const normalizedCases = (Array.isArray(cases) ? cases : [])
     .map((item, index) => {
       if (typeof item === 'string') {
@@ -6914,7 +7005,7 @@ async function bootstrap() {
     } catch(e) { console.warn('[Sentinela Pro] Não foi possível importar backup:', e.message); }
   }
   renderToast();
-  if (window.location.hostname.includes('mercadolivre.com.br') || window.location.hostname.includes('mercadolibre.com')) {
+  if (isMercadoLivreHost()) {
     createTopBar();
   }
 }
@@ -8184,8 +8275,8 @@ function monitorarMudancasURL() {
 // ══════════════════════════════════════════════════════════════
 // CLIP: EXECUÇÃO PRINCIPAL (captura automática ao carregar)
 // ══════════════════════════════════════════════════════════════
-if (window.location.hostname.includes('mercadolivre.com.br') || window.location.hostname.includes('mercadolibre.com')) {
-  window.addEventListener('load', async () => {
+if (isMercadoLivreHost()) {
+  const iniciarPaginaMercadoLivre = async () => {
     monitorarMudancasURL();
     const dadosJaSalvos = await carregarDadosClip();
     if (!dadosJaSalvos.url) {
@@ -8205,7 +8296,15 @@ if (window.location.hostname.includes('mercadolivre.com.br') || window.location.
     } else {
       syncCustomerHistoryButton();
     }
-  });
+  };
+
+  // Com run_at document_idle o script pode entrar depois do "load" (página leve);
+  // nesse caso o evento não dispara mais e a inicialização nunca rodaria.
+  if (document.readyState === 'complete') {
+    iniciarPaginaMercadoLivre();
+  } else {
+    window.addEventListener('load', iniciarPaginaMercadoLivre, { once: true });
+  }
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -8219,6 +8318,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return;
   }
   if (message.action === 'run_customer_history_lookup') {
+    // A busca usa a origem desta aba; fora do ML ela não serve (o background tenta outra aba).
+    if (!isMercadoLivreHost()) {
+      sendResponse({ ok: false, error: 'A aba não está mais no Mercado Livre.' });
+      return;
+    }
     performCustomerHistoryLookup(message.login).then((results) => {
       sendResponse({ ok: true, results });
     }).catch((error) => {
