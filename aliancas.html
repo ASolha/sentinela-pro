@@ -10,39 +10,33 @@
   <div id="al-app">
     <!-- Cabeçalho -->
     <header class="al-header">
-      <div class="al-header__brand">
-        <div class="al-logo">◈</div>
-        <div>
-          <h1>Trocas</h1>
-          <p class="al-sub">Casos de troca, defeito e gravação</p>
-        </div>
+      <svg class="al-mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5c0 5-3.5 8-7 10-3.5-2-7-5-7-10V6z"/></svg>
+      <div class="al-header__titles">
+        <h1>Trocas</h1>
+        <p class="al-sub">Casos de troca, defeito e gravação · quadro da equipe</p>
       </div>
-      <div class="al-header__user">
-        <span id="al-user-name" class="al-user-name">—</span>
-        <span id="al-conn" class="al-conn al-conn--off" title="Status da conexão"></span>
-      </div>
+      <span class="al-grow"></span>
+      <span class="al-live" title="Status da conexão"><span id="al-conn" class="al-conn al-conn--off"></span><span id="al-conn-text">Conectando…</span></span>
+      <span id="al-user-name" class="al-user-name">—</span>
     </header>
 
-    <!-- Barra de ações -->
-    <nav class="al-toolbar">
-      <div class="al-tabs">
-        <button class="al-tab is-active" data-view="ativos" type="button">Casos da semana</button>
-        <button class="al-tab" data-view="historico" type="button">Histórico</button>
-      </div>
-      <div class="al-toolbar__actions">
-        <button id="al-btn-novo" class="al-btn al-btn--primary" type="button">+ Adicionar caso</button>
-        <button id="al-btn-resumo" class="al-btn" type="button">Resumo</button>
-        <button id="al-btn-fechar" class="al-btn al-btn--ghost" type="button">Fechar semana</button>
-        <button id="al-btn-regras" class="al-btn al-btn--ghost al-admin-only" type="button" hidden>Regras do resumo</button>
-        <button id="al-btn-seletores" class="al-btn al-btn--ghost al-admin-only" type="button" hidden>Gerenciar seletores</button>
-      </div>
+    <!-- Abas e ações -->
+    <nav class="al-tabs" role="tablist">
+      <button class="al-tab is-active" data-view="ativos" type="button">Casos da semana <span id="al-tab-count" class="al-count">0</span></button>
+      <button class="al-tab" data-view="historico" type="button">Histórico</button>
     </nav>
+    <div class="al-toolbar">
+      <button id="al-btn-novo" class="al-btn al-btn--primary" type="button">+ Adicionar caso</button>
+      <button id="al-btn-resumo" class="al-btn" type="button">Resumo</button>
+      <button id="al-btn-fechar" class="al-btn al-btn--ghost" type="button">Fechar semana</button>
+      <span id="al-counters" class="al-counters"></span>
+      <span class="al-grow"></span>
+      <button id="al-btn-regras" class="al-btn al-btn--ghost al-admin-only" type="button" hidden>Regras do resumo</button>
+      <button id="al-btn-seletores" class="al-btn al-btn--ghost al-admin-only" type="button" hidden>Gerenciar seletores</button>
+    </div>
 
     <!-- Faixa de status/mensagens -->
     <div id="al-status" class="al-status" hidden></div>
-
-    <!-- Contadores rápidos -->
-    <div id="al-counters" class="al-counters"></div>
 
     <!-- Lista de casos ativos -->
     <main id="al-view-ativos" class="al-view">
@@ -69,12 +63,12 @@
       <form id="al-form" class="al-form">
         <input type="hidden" id="al-form-id" />
         <label class="al-field">
-          <span>Título <em>(opcional — ex.: nº da OS, nome, referência)</em></span>
+          <span>Título <em>(opcional — nº da OS, nome, referência)</em></span>
           <input type="text" id="al-form-titulo" maxlength="120" placeholder="Ex.: Aliança par — João / OS 1234" />
         </label>
 
         <div class="al-field">
-          <span>Classificações</span>
+          <span>Tipo</span>
           <div id="al-form-seletores" class="al-checks"></div>
         </div>
 

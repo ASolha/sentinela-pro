@@ -19,6 +19,67 @@ let currentView = 'ativos';
 let dragSeletorId = null; // arraste no gerenciador de seletores
 let editingRegraId = null; // regra em edição no formulário de regras
 
+/* ── Tema (o mesmo da extensão: chrome.storage 'sp.ui.theme') ─────────── */
+const THEME_KEY = 'sp.ui.theme';
+const darkMedia = window.matchMedia('(prefers-color-scheme: dark)');
+let themePref = 'system';
+function applyTheme() {
+  const dark = themePref === 'dark' || (themePref === 'system' && darkMedia.matches);
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+}
+if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+  chrome.storage.local.get(THEME_KEY, (d) => { themePref = d?.[THEME_KEY] || 'system'; applyTheme(); });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === 'local' && changes[THEME_KEY]) { themePref = changes[THEME_KEY].newValue || 'system'; applyTheme(); }
+  });
+}
+darkMedia.addEventListener?.('change', applyTheme);
+applyTheme();
+
+/* ── Diálogos no padrão da extensão (em vez de alert/confirm/prompt) ─── */
+function uiDialog({ title, body = '', input = null, confirmLabel = 'Confirmar', cancelLabel = 'Cancelar', danger = false }) {
+  return new Promise((resolve) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'al-dialog';
+    wrap.innerHTML = `
+      <div class="al-dialog__box" role="alertdialog" aria-modal="true">
+        <div class="al-dialog__title"></div>
+        ${body ? '<div class="al-dialog__body"></div>' : ''}
+        ${input !== null ? '<input class="al-input al-dialog__input" maxlength="120" />' : ''}
+        <div class="al-dialog__actions">
+          ${cancelLabel ? '<button type="button" class="al-btn al-btn--ghost" data-r="0"></button>' : ''}
+          <button type="button" class="al-btn ${danger ? 'al-btn--danger-solid' : 'al-btn--primary'}" data-r="1"></button>
+        </div>
+      </div>`;
+    wrap.querySelector('.al-dialog__title').textContent = title;
+    if (body) wrap.querySelector('.al-dialog__body').textContent = body;
+    if (cancelLabel) wrap.querySelector('[data-r="0"]').textContent = cancelLabel;
+    wrap.querySelector('[data-r="1"]').textContent = confirmLabel;
+    const field = wrap.querySelector('.al-dialog__input');
+    if (field) field.value = input;
+    const done = (ok) => {
+      wrap.remove();
+      document.removeEventListener('keydown', onKey, true);
+      resolve(input !== null ? (ok ? field.value : null) : ok);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); done(false); }
+      if (e.key === 'Enter' && (field || document.activeElement?.dataset?.r !== '0')) { e.preventDefault(); done(true); }
+    };
+    wrap.addEventListener('click', (e) => {
+      if (e.target === wrap) done(false);
+      const r = e.target.closest?.('[data-r]');
+      if (r) done(r.dataset.r === '1');
+    });
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(wrap);
+    (field || wrap.querySelector('[data-r="1"]')).focus();
+    field?.select();
+  });
+}
+const uiConfirm = (title, body, confirmLabel = 'Excluir') => uiDialog({ title, body, confirmLabel, danger: true });
+const uiAlert = (title, body) => uiDialog({ title, body, confirmLabel: 'Entendi', cancelLabel: null });
+
 /* ── Sessão / storage ──────────────────────────────────────────────────── */
 function hasStorage() {
   return typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local;
@@ -41,19 +102,19 @@ function isAdmin() {
 }
 
 /* ── Supabase REST ─────────────────────────────────────────────────────── */
+// A renovação do token é feita só pelo background (uma por vez), para não
+// derrubar a sessão quando várias abas renovam ao mesmo tempo.
 async function refreshSession() {
   if (!auth.refreshToken) throw new Error('Sem refresh token.');
-  const res = await fetch(`${CFG.supabaseUrl}/auth/v1/token?grant_type=refresh_token`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', apikey: CFG.supabaseKey },
-    body: JSON.stringify({ refresh_token: auth.refreshToken })
+  const reply = await chrome.runtime.sendMessage({
+    __sp: 'auth.refresh',
+    payload: { staleRefreshToken: auth.refreshToken }
   });
-  if (!res.ok) throw new Error('Sessão expirada. Faça login novamente pela extensão.');
-  const data = await res.json();
-  auth.token = data.access_token;
-  auth.refreshToken = data.refresh_token;
-  await saveSession({ access_token: data.access_token, refresh_token: data.refresh_token, user: auth.user });
-  return data;
+  const session = reply && reply.ok ? reply.data : null;
+  if (!session?.access_token) throw new Error('Sessão expirada. Faça login novamente pela extensão.');
+  auth.token = session.access_token;
+  auth.refreshToken = session.refresh_token;
+  return session;
 }
 
 async function sbFetch(path, opts = {}) {
@@ -272,17 +333,29 @@ function resumoTexto(list, titulo) {
 /* ── Render: casos ─────────────────────────────────────────────────────── */
 function renderCounters() {
   const totalAliancas = casos.reduce((s, c) => s + (Number(c.quantidade) || 1), 0);
-  el('al-counters').innerHTML = `
-    <div class="al-counter"><b>${casos.length}</b><span>casos</span></div>
-    <div class="al-counter"><b>${totalAliancas}</b><span>alianças</span></div>
-  `;
+  el('al-counters').textContent = `${casos.length} caso${casos.length === 1 ? '' : 's'} · ${totalAliancas} aliança${totalAliancas === 1 ? '' : 's'}`;
+  const count = el('al-tab-count');
+  if (count) count.textContent = String(casos.length);
 }
 
+/* Cor da bolinha de cada seletor: fixa pelo nome (mesma cor em todos os cartões e computadores). */
+const TAG_COLORS = ['#3b82f6', '#ef4444', '#8b5cf6', '#f59e0b', '#10b981', '#ec4899', '#14b8a6', '#64748b'];
+const KNOWN_TAG_COLORS = { troca: '#3b82f6', defeito: '#ef4444', 'sem defeito': '#10b981', 'nova gravação': '#8b5cf6', regravação: '#f59e0b', aro: '#64748b' };
+function tagColor(label) {
+  if (KNOWN_TAG_COLORS[normLabel(label)]) return KNOWN_TAG_COLORS[normLabel(label)];
+  let h = 0;
+  for (const ch of normLabel(label)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return TAG_COLORS[h % TAG_COLORS.length];
+}
 function chipsHTML(labels) {
   const ordered = orderLabels(labels);
   return (ordered && ordered.length)
-    ? ordered.map((s) => `<span class="al-chip">${esc(s)}</span>`).join('')
+    ? ordered.map((s) => `<span class="al-chip"><span class="al-dot" style="background:${tagColor(s)}"></span>${esc(s)}</span>`).join('')
     : '<span class="al-chip al-chip--none">Sem classificação</span>';
+}
+function qtdText(c) {
+  const n = Number(c.quantidade) || 1;
+  return `${n} aliança${n === 1 ? '' : 's'}`;
 }
 
 function cardHTML(c) {
@@ -290,17 +363,15 @@ function cardHTML(c) {
     <article class="al-card" data-id="${c.id}">
       <div class="al-card__top">
         <div class="al-card__title ${c.titulo ? '' : 'is-empty'}">${c.titulo ? esc(c.titulo) : 'Sem título'}</div>
+        <span class="al-card__qtd">${qtdText(c)}</span>
       </div>
       <div class="al-chips">${chipsHTML(c.seletores)}</div>
-      <div class="al-card__qtd">Quantidade: <b>${Number(c.quantidade) || 1}</b> aliança(s)</div>
       ${c.observacao ? `<div class="al-card__obs">${esc(c.observacao)}</div>` : ''}
-      <div class="al-card__meta">
-        <span>${esc(c.created_by_name || '—')}</span>
-        <span>${fmtDate(c.created_at)}</span>
-      </div>
-      <div class="al-card__actions">
-        <button class="al-btn al-btn--sm al-btn--ghost" data-act="edit" data-id="${c.id}">Editar</button>
-        <button class="al-btn al-btn--sm al-btn--danger" data-act="delete" data-id="${c.id}">Excluir</button>
+      <div class="al-card__foot">
+        <span class="al-card__meta">${esc(c.created_by_name || '—')} · ${fmtDate(c.created_at)}</span>
+        <span class="al-grow"></span>
+        <button class="al-link" data-act="edit" data-id="${c.id}">Editar</button>
+        <button class="al-link al-link--danger" data-act="delete" data-id="${c.id}">Excluir</button>
       </div>
     </article>
   `;
@@ -345,8 +416,8 @@ function renderCasos() {
     return `
       <div class="al-col">
         <div class="al-col__head">
-          <span class="al-col__name">${esc(info.name)}${key === auth.user.id ? ' (você)' : ''}</span>
-          <span class="al-col__count">${info.list.length} caso(s) · ${totalAl} aliança(s)</span>
+          <span class="al-col__name">${key === auth.user.id ? `Você (${esc(info.name)})` : esc(info.name)}</span>
+          <span class="al-col__count">${info.list.length} caso${info.list.length === 1 ? '' : 's'} · ${totalAl} aliança${totalAl === 1 ? '' : 's'}</span>
         </div>
         <div class="al-col__cards">${info.list.map(cardHTML).join('')}</div>
       </div>`;
@@ -359,14 +430,11 @@ function historicoCasoHTML(c) {
     <div class="al-hist-caso">
       <div class="al-hist-caso__head">
         <span class="al-hist-caso__title ${c.titulo ? '' : 'is-empty'}">${c.titulo ? esc(c.titulo) : 'Sem título'}</span>
-        <span class="al-hist-caso__qtd">${Number(c.quantidade) || 1} aliança(s)</span>
+        <span class="al-hist-caso__qtd">${qtdText(c)}</span>
       </div>
       <div class="al-chips">${chipsHTML(c.seletores)}</div>
       ${c.observacao ? `<div class="al-card__obs">${esc(c.observacao)}</div>` : ''}
-      <div class="al-card__meta">
-        <span>${esc(c.created_by_name || '—')}</span>
-        <span>${fmtDate(c.created_at)}</span>
-      </div>
+      <div class="al-card__meta">${esc(c.created_by_name || '—')} · ${fmtDate(c.created_at)}</div>
     </div>
   `;
 }
@@ -434,13 +502,13 @@ async function renderHistorico() {
 
 async function deleteBatch(label, ids) {
   if (!ids || !ids.length) return;
-  if (!confirm(`Excluir DEFINITIVAMENTE o histórico "${label}"?\n\nApaga ${ids.length} caso(s) arquivado(s) dessa semana. Não pode ser desfeito.`)) return;
+  if (!(await uiConfirm(`Excluir o histórico "${label}"?`, `Apaga ${ids.length} caso(s) arquivado(s) dessa semana. Não dá para desfazer.`))) return;
   try {
     await sbFetch(`/rest/v1/aliancas_casos?id=in.(${ids.join(',')})`, { method: 'DELETE' });
     setStatus(`Histórico "${label}" excluído.`, 'success');
     renderHistorico();
   } catch (e) {
-    alert('Erro ao excluir o histórico: ' + e.message);
+    uiAlert('Não foi possível excluir o histórico', e.message);
   }
 }
 
@@ -501,7 +569,7 @@ async function handleCardAction(act, id) {
   if (!caso) return;
   if (act === 'edit') { openCasoModal(caso); return; }
   if (act === 'delete') {
-    if (!confirm('Excluir este caso definitivamente?')) return;
+    if (!(await uiConfirm('Excluir este caso?', caso.titulo || 'Sem título'))) return;
     try {
       await deleteCaso(id);
       await loadCasos();
@@ -531,8 +599,7 @@ async function fecharSemana() {
   if (!casos.length) { setStatus('Não há casos para arquivar.', 'error'); return; }
   const hoje = new Date().toLocaleDateString('pt-BR');
   const padrao = `Semana de ${hoje}`;
-  let label = prompt(
-    `Arquivar ${casos.length} caso(s) da semana.\n\nRótulo do lote:`, padrao);
+  let label = await uiDialog({ title: `Fechar a semana (${casos.length} caso${casos.length === 1 ? '' : 's'})`, body: 'Os casos vão para o Histórico com este nome:', input: padrao, confirmLabel: 'Fechar semana' });
   if (label === null) return;
   label = label.trim() || padrao;
 
@@ -587,7 +654,7 @@ async function reorderSeletores(fromId, targetId, after) {
     await Promise.all(arr.map((s, i) => updateSeletor(s.id, { sort_order: (i + 1) * 10 })));
     await loadSeletores();
   } catch (e) {
-    alert('Erro ao salvar a ordem: ' + e.message);
+    uiAlert('Não foi possível salvar a ordem', e.message);
     await loadSeletores();
   }
   renderSeletoresList();
@@ -601,26 +668,26 @@ async function handleSeletorAction(act, id) {
     if (act === 'toggle') {
       await updateSeletor(id, { is_active: !s.is_active });
     } else if (act === 'delete') {
-      if (!confirm(`Excluir o seletor "${s.label}"? Casos antigos que já o usam continuam intactos.`)) return;
+      if (!(await uiConfirm(`Excluir o seletor "${s.label}"?`, 'Casos antigos que já o usam continuam intactos.'))) return;
       await deleteSeletor(id);
     }
     await loadSeletores();
     renderSeletoresList();
   } catch (e) {
     // se falhar por casos usando o label, orienta desativar
-    alert('Não foi possível excluir agora (' + e.message + '). Use "Desativar".');
+    uiAlert('Não foi possível excluir agora', `${e.message}. Use "Desativar".`);
   }
 }
 
 // Renomeia um seletor e propaga o novo nome para os casos ATIVOS e as regras
 // que o usam (arquivados mantêm o nome antigo — são registro histórico).
 async function editSeletorLabel(s) {
-  const novo = prompt('Editar nome do seletor:', s.label);
+  const novo = await uiDialog({ title: 'Renomear seletor', input: s.label, confirmLabel: 'Salvar' });
   if (novo === null) return;
   const label = novo.trim();
   if (!label || label === s.label) return;
   if (seletores.some((x) => String(x.id) !== String(s.id) && x.label.toLowerCase() === label.toLowerCase())) {
-    alert('Já existe um seletor com esse nome.');
+    uiAlert('Já existe um seletor com esse nome.');
     return;
   }
   const antigo = s.label;
@@ -639,7 +706,7 @@ async function editSeletorLabel(s) {
       ? ` (${casosAfetados.length} caso(s) e ${regrasAfetadas.length} regra(s) atualizados)` : '';
     setStatus(`Seletor renomeado para "${label}"${extra}.`, 'success');
   } catch (e) {
-    alert('Erro ao editar o seletor: ' + e.message);
+    uiAlert('Não foi possível renomear o seletor', e.message);
     await loadSeletores();
     renderSeletoresList();
   }
@@ -650,7 +717,7 @@ async function submitSeletor(e) {
   const label = input.value.trim();
   if (!label) return;
   if (seletores.some((s) => s.label.toLowerCase() === label.toLowerCase())) {
-    alert('Esse seletor já existe.'); return;
+    uiAlert('Esse seletor já existe.'); return;
   }
   try {
     await createSeletor(label);
@@ -658,7 +725,7 @@ async function submitSeletor(e) {
     await loadSeletores();
     renderSeletoresList();
   } catch (err) {
-    alert('Erro ao adicionar: ' + err.message);
+    uiAlert('Não foi possível adicionar', err.message);
   }
 }
 
@@ -732,7 +799,7 @@ async function handleRegraAction(act, id) {
   if (act === 'edit') { startEditRegra(regras[idx]); return; }
   try {
     if (act === 'delete') {
-      if (!confirm(`Excluir a regra "${regras[idx].label}"?`)) return;
+      if (!(await uiConfirm(`Excluir a regra "${regras[idx].label}"?`))) return;
       if (String(editingRegraId) === String(id)) resetRegraForm();
       await deleteRegra(id);
     } else if (act === 'up' && idx > 0) {
@@ -745,7 +812,7 @@ async function handleRegraAction(act, id) {
     await loadRegras();
     renderRegrasList();
   } catch (e) {
-    alert('Erro: ' + e.message);
+    uiAlert('Não deu certo', e.message);
   }
 }
 async function swapRegras(i, j) {
@@ -760,11 +827,11 @@ async function submitRegra(e) {
   e.preventDefault();
   const label = el('al-regra-label').value.trim();
   const sel = [...el('al-regra-seletores').querySelectorAll('input:checked')].map((i) => i.value);
-  if (!label) { alert('Escreva o rótulo da regra.'); return; }
-  if (!sel.length) { alert('Marque ao menos um seletor.'); return; }
+  if (!label) { uiAlert('Escreva o rótulo da regra.'); return; }
+  if (!sel.length) { uiAlert('Marque ao menos um seletor.'); return; }
   // duplicata: mesma combinação, ignorando a própria regra em edição
   if (regras.some((r) => String(r.id) !== String(editingRegraId) && setKey(r.seletores) === setKey(sel))) {
-    alert('Já existe uma regra para essa combinação de seletores.'); return;
+    uiAlert('Já existe uma regra para essa combinação de seletores.'); return;
   }
   try {
     if (editingRegraId) {
@@ -777,7 +844,7 @@ async function submitRegra(e) {
     await loadRegras();
     renderRegrasList();
   } catch (err) {
-    alert('Erro ao salvar a regra: ' + err.message + '\n(Verifique se a migration de regras foi aplicada no Supabase.)');
+    uiAlert('Não foi possível salvar a regra', `${err.message} (verifique se a migration de regras foi aplicada no Supabase).`);
   }
 }
 
@@ -809,7 +876,7 @@ function wireEvents() {
       await navigator.clipboard.writeText(txt);
       el('al-resumo-copy').textContent = 'Copiado!';
       setTimeout(() => { el('al-resumo-copy').textContent = 'Copiar resumo'; }, 1800);
-    } catch (_) { alert(txt); }
+    } catch (_) { uiAlert('Copie o resumo', txt); }
   });
 
   // fechar modais
@@ -911,6 +978,8 @@ function setConn(on) {
   if (!dot) return;
   dot.className = 'al-conn ' + (on ? 'al-conn--on' : 'al-conn--off');
   dot.title = on ? 'Atualização em tempo real ativa' : 'Sem tempo real — reconectando…';
+  const text = el('al-conn-text');
+  if (text) text.textContent = on ? 'Ao vivo' : 'Reconectando…';
 }
 function rtSend(msg) {
   if (rtSocket && rtSocket.readyState === WebSocket.OPEN) rtSocket.send(JSON.stringify(msg));
@@ -988,11 +1057,14 @@ async function init() {
   const session = await getSession();
   if (!session?.access_token || !session?.user) {
     document.getElementById('al-app').innerHTML = `
-      <div class="al-empty" style="padding-top:120px">
-        <h2 style="margin:0">Você não está conectado</h2>
-        <p>Abra a extensão Sentinela Pro em uma aba do Mercado Livre e faça login na sua conta do Hub. Depois recarregue esta página.</p>
-        <button id="al-reload" class="al-btn al-btn--primary">Recarregar</button>
+      <div class="al-signin">
+        <div class="al-signin__title">Entre na conta para ver as Trocas</div>
+        <p>Numa aba do Mercado Livre, abra a Conta no dock da Sentinela (ou Alt+U) e entre. Esta página atualiza sozinha.</p>
+        <button id="al-reload" class="al-btn">Recarregar</button>
       </div>`;
+    chrome.storage?.onChanged?.addListener((changes, area) => {
+      if (area === 'local' && changes[HUB_SESSION_KEY]?.newValue) location.reload();
+    });
     document.getElementById('al-reload')?.addEventListener('click', () => location.reload());
     return;
   }
