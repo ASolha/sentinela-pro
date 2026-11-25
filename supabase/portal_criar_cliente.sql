@@ -2,9 +2,12 @@
 -- Portal de Trocas — cria o acesso de uma cliente (ex.: Giovana)
 --
 -- 1. No Supabase: Authentication → Users → Add user → Create new user.
---    E-mail e senha da cliente, com "Auto Confirm User" marcado.
+--    Para ela entrar só com um nome de usuário (ex.: giovana), use o e-mail
+--    interno  giovana@portal.medievaljoias.com.br  (não recebe nada) e uma senha,
+--    com "Auto Confirm User" marcado. Um e-mail de verdade também funciona.
 -- 2. Troque o e-mail e o nome abaixo e rode este arquivo no SQL Editor.
--- 3. Peça para a cliente entrar em https://medievaljoias.com.br/pedidos/
+-- 3. Mande para a cliente: https://medievaljoias.com.br/pedidos/ ,
+--    usuário "giovana" (a parte antes do @) e a senha.
 --
 -- Faça primeiro com uma conta de teste e confira o fluxo inteiro.
 -- Para tirar o acesso: update public.portal_clientes set ativo = false where ...
@@ -12,7 +15,7 @@
 
 do $$
 declare
-  v_email text := 'giovana@exemplo.com.br';   -- ← e-mail da cliente
+  v_email text := 'giovana@portal.medievaljoias.com.br';   -- ← e-mail interno (ou real) da cliente
   v_nome  text := 'Giovana';                  -- ← nome que aparece no Sentinela e no canhoto
   v_uid   uuid;
 begin

@@ -1293,6 +1293,13 @@ function wirePortalEvents() {
     portalBuscar(el('al-portal-q').value);
     el('al-portal-q').select();
   });
+  el('al-portal-camera').addEventListener('click', async () => {
+    if (typeof window.lerQRCamera !== 'function') { uiAlert('Leitor indisponível', 'Digite o código do canhoto no campo de busca.'); return; }
+    const lido = await window.lerQRCamera({ titulo: 'Ler o QR do canhoto' });
+    if (!lido) return;
+    el('al-portal-q').value = lido;
+    portalBuscar(lido);
+  });
   el('al-portal-body').addEventListener('click', (e) => {
     const b = e.target.closest('[data-portal-act]');
     if (b) handlePortalAction(b.dataset.portalAct, b);

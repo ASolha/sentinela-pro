@@ -57,6 +57,7 @@
       <form id="al-portal-busca" class="al-portal-busca" autocomplete="off">
         <input type="text" id="al-portal-q" class="al-input" placeholder="Código da troca ou do pacote (TR-0042-03) — ou leia o QR do canhoto" aria-label="Buscar troca ou pacote pelo código" />
         <button type="submit" class="al-btn">Buscar</button>
+        <button type="button" class="al-btn" id="al-portal-camera" title="Abre a câmera do notebook para ler o QR do canhoto">Ler QR com a câmera</button>
       </form>
       <div id="al-portal-body"></div>
     </main>
@@ -179,6 +180,9 @@
     </div>
   </div>
 
+  <!-- jsQR 1.4.0 (Apache-2.0) + leitor pela câmera, para ler o QR do canhoto sem leitor físico -->
+  <script src="jsqr.js"></script>
+  <script src="leitor-qr.js"></script>
   <script src="aliancas.js"></script>
 </body>
 </html>

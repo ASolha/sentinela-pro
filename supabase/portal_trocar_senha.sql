@@ -9,7 +9,7 @@
 
 do $$
 declare
-  v_email text := 'giovana@exemplo.com.br';   -- ← e-mail da cliente
+  v_email text := 'giovana@portal.medievaljoias.com.br';   -- ← usuário "giovana" = este e-mail interno
   v_senha text := 'TroqueEsta123';            -- ← senha nova (mínimo 8 caracteres)
   v_n int;
 begin
