@@ -880,8 +880,8 @@ const PORTAL_STATUS = {
   rascunho: { t: 'Rascunho', k: 'done' },
   enviada: { t: 'A conferir', k: 'info' },
   recebida: { t: 'Recebida', k: 'warn' },
-  concluida: { t: 'Concluída', k: 'ok' },
-  devolvida: { t: 'Devolvida', k: 'done' },
+  concluida: { t: 'Finalizada', k: 'ok' }, // legado: concluída antes de juntar com a devolução
+  devolvida: { t: 'Finalizada', k: 'ok' },  // concluída e enviada de volta à cliente
   cancelada: { t: 'Cancelada', k: 'done' }
 };
 const PORTAL_CODIGO_RE = /TR-\d{4,}(?:-\d{2,})?/i;
@@ -917,7 +917,7 @@ function portalPill(status) {
 }
 function portalVersaoAviso(i) {
   if (i.impressa_versao == null) return '<span class="al-pill al-pill--warn">Canhoto não impresso</span>';
-  if (i.impressa_versao !== i.versao) return `<span class="al-pill al-pill--warn">v${i.versao} não impressa · papel pode estar na v${i.impressa_versao}</span>`;
+  if (i.impressa_versao !== i.versao) return '<span class="al-pill al-pill--warn">Alterada depois de impressa · o papel pode estar desatualizado</span>';
   return '';
 }
 function portalPluralStatus(st, n) {
@@ -935,10 +935,10 @@ function portalAtualizarAba() {
 }
 
 function portalBarra(itens) {
-  const ordem = ['devolvida', 'concluida', 'recebida', 'enviada'];
+  const ordem = ['devolvida', 'recebida', 'enviada'];
   const n = itens.length || 1;
   const cont = {};
-  itens.forEach((i) => { cont[i.status] = (cont[i.status] || 0) + 1; });
+  itens.forEach((i) => { const st = i.status === 'concluida' ? 'devolvida' : i.status; cont[st] = (cont[st] || 0) + 1; });
   const bar = ordem.filter((s) => cont[s]).map((s) => `<span class="al-pbar__s al-pbar__s--${PORTAL_STATUS[s].k}" style="width:${(cont[s] / n) * 100}%"></span>`).join('');
   const leg = ordem.filter((s) => cont[s]).map((s) => portalPluralStatus(s, cont[s])).join(' · ');
   return `<div class="al-pbar" aria-hidden="true">${bar}</div><div class="al-card__meta">${esc(leg)}</div>`;
@@ -978,7 +978,7 @@ function renderPortal() {
       ${ativos.length ? `<div class="al-cards">${ativos.map(portalLoteCard).join('')}</div>`
         : '<div class="al-empty"><p>Nenhum pacote em andamento. Quando a cliente fechar um pacote, ele aparece aqui.</p></div>'}
     </section>
-    ${devolvidos.length ? `<details class="al-psec al-psec--dev"><summary class="al-psec__t">Devolvidos <span class="al-count">${devolvidos.length}</span></summary>
+    ${devolvidos.length ? `<details class="al-psec al-psec--dev"><summary class="al-psec__t">Finalizados <span class="al-count">${devolvidos.length}</span></summary>
       <div class="al-cards">${devolvidos.map(portalLoteCard).join('')}</div></details>` : ''}`;
 }
 
@@ -999,17 +999,15 @@ function portalAbrirLote(id) {
     ${portalBarra(itens)}
     <div class="al-pacoes">
       ${!l.recebido_em && l.status === 'enviado' ? `<button class="al-btn al-btn--primary" data-portal-act="lote-recebido" data-id="${l.id}">Marcar pacote como recebido</button>` : ''}
-      <button class="al-btn" data-portal-act="devolver" data-id="${l.id}" id="al-portal-devolver" disabled>Devolver marcadas</button>
-      <span class="al-hint">Marque as trocas concluídas que voltam para a cliente.</span>
+      <span class="al-hint">Abra cada troca para conferir e finalizar. O pacote fecha sozinho quando todas estiverem finalizadas.</span>
     </div>
     <div class="al-plist">
       ${itens.map((i) => `
         <div class="al-prow">
-          <input type="checkbox" class="al-pcheck" data-id="${i.id}" ${i.status === 'concluida' ? '' : 'disabled'} aria-label="Devolver ${esc(i.codigo)}" />
           <span class="al-mono">${esc(i.codigo)}</span>
           <span class="al-prow__main">
             <span class="al-prow__ref">${esc(i.referencia || 'Sem referência')}</span>
-            <span class="al-card__meta">${i.peca === 'par' ? 'Par' : 'Avulsa'} · ${portalOrdenarTipos(i.tipos).map((k) => PORTAL_TIPOS[k]).join(', ')} · v${i.versao}</span>
+            <span class="al-card__meta">${i.peca === 'par' ? 'Par' : 'Avulsa'} · ${portalOrdenarTipos(i.tipos).map((k) => PORTAL_TIPOS[k]).join(', ')}</span>
           </span>
           <span class="al-prow__pills">${portalPill(i.status)}${i.status === 'enviada' ? portalVersaoAviso(i) : ''}</span>
           <button class="al-btn al-btn--sm" data-portal-act="abrir-item" data-id="${i.id}">${i.status === 'enviada' ? 'Conferir' : 'Abrir'}</button>
@@ -1018,7 +1016,7 @@ function portalAbrirLote(id) {
   el('al-modal-portal').hidden = false;
 }
 
-/* Modal da troca: conferir / concluir / devolver */
+/* Modal da troca: conferir e finalizar */
 function portalTextoGravacao(g) {
   const txt = g.texto || '';
   if (!txt) return '<span class="al-hint">(desenho do anexo)</span>';
@@ -1059,11 +1057,11 @@ function portalSeletoresSugeridos(i) {
 }
 function portalEventoTxt(ev) {
   const [acao, valor] = String(ev.acao || '').split(':');
-  const status = { enviada: 'Fechou o pacote (troca enviada)', recebida: 'Conferiu e recebeu', concluida: 'Concluiu', devolvida: 'Devolveu', cancelada: 'Cancelou' };
+  const status = { enviada: 'Fechou o pacote (troca enviada)', recebida: 'Conferiu e recebeu', concluida: 'Concluiu', devolvida: 'Finalizou (enviada de volta)', cancelada: 'Cancelou' };
   if (acao === 'criada') return 'Cadastrou a troca';
   if (acao === 'excluida') return 'Excluiu a troca';
-  if (acao === 'versao') return `Alterou a troca depois de imprimir (virou v${valor})`;
-  if (acao === 'impressa') return `Imprimiu o canhoto v${valor}`;
+  if (acao === 'versao') return 'Alterou a troca depois de imprimir';
+  if (acao === 'impressa') return 'Imprimiu o canhoto';
   if (acao === 'status') return status[valor] || `Status: ${valor}`;
   if (acao === 'alterada') return ev.da_cliente ? 'Alterou a troca' : 'Atualizou a conferência';
   return acao;
@@ -1096,25 +1094,25 @@ async function portalAbrirItem(id) {
         ${i.status === 'enviada' ? '<span class="al-hint">Cria o card nos Casos da semana com estes seletores.</span>' : ''}
       </section>`;
   }
-  if (i.status === 'recebida') {
+  if (i.status === 'recebida' || i.status === 'concluida') {
     acao += `
       <section class="al-pbox">
-        <h4>Concluir</h4>
+        <h4>Finalizar</h4>
         <label class="al-field"><span>O que foi feito <em>(a cliente vê no portal)</em></span>
           <textarea id="al-portal-nota" rows="3" placeholder="Ex.: Feminina ajustada para 17, masculina mantida.">${esc(i.nota_equipe || '')}</textarea></label>
         <label class="al-check ${i.divergencia ? 'is-checked' : ''}" style="align-self:flex-start"><input type="checkbox" id="al-portal-div" ${i.divergencia ? 'checked' : ''}/>Diferente do que a cliente descreveu</label>
         <label class="al-field" id="al-portal-div-box" ${i.divergencia ? '' : 'hidden'}><span>O que estava diferente <em>(a cliente vê)</em></span>
           <textarea id="al-portal-div-nota" rows="2">${esc(i.divergencia_nota || '')}</textarea></label>
-        <button class="al-btn al-btn--primary" data-portal-act="concluir" data-id="${i.id}">Concluir troca</button>
+        <button class="al-btn al-btn--primary" data-portal-act="concluir" data-id="${i.id}">Finalizar troca</button>
+        <span class="al-hint">Finalizada = concluída e enviada de volta para a cliente.</span>
       </section>`;
   }
-  if (i.status === 'concluida' || i.status === 'devolvida') {
+  if (i.status === 'devolvida') {
     acao += `
       <section class="al-pbox">
-        <h4>${i.status === 'concluida' ? 'Concluída' : 'Devolvida'}</h4>
+        <h4>Finalizada</h4>
         ${i.nota_equipe ? `<p class="al-pnota">${esc(i.nota_equipe)}</p>` : '<p class="al-hint">Sem nota.</p>'}
         ${i.divergencia ? `<p class="al-pnota al-pnota--warn"><b>Diferente do descrito:</b> ${esc(i.divergencia_nota)}</p>` : ''}
-        ${i.status === 'concluida' ? `<button class="al-btn al-btn--primary" data-portal-act="devolver-um" data-id="${i.id}">Devolver para a cliente</button>` : ''}
       </section>`;
   }
 
@@ -1126,8 +1124,8 @@ async function portalAbrirItem(id) {
       <span>${l ? esc(portalCliente(l.cliente_id)) : ''}</span>
     </div>
     <div class="al-pversao">
-      <div><b>Versão atual: v${i.versao}</b> · salva em ${fmtDate(i.versao_em)} ${portalVersaoAviso(i)}</div>
-      <div class="al-hint">Confira o rodapé do canhoto: ele deve dizer “Versão ${i.versao}”. Versão menor = papel desatualizado; a troca vale como está aqui.</div>
+      <div><b>Última alteração: ${fmtDate(i.versao_em)}</b> ${portalVersaoAviso(i)}</div>
+      <div class="al-hint">Confira o rodapé do canhoto: ele deve dizer “Atualizada em ${fmtDate(i.versao_em)}”. Data mais antiga = papel desatualizado; a troca vale como está aqui.</div>
     </div>
     <div class="al-pgrid">
       <section class="al-pbox">
@@ -1265,20 +1263,9 @@ async function handlePortalAction(act, btn) {
       btn.disabled = true;
       await sbFetch(`/rest/v1/portal_itens?id=eq.${id}`, {
         method: 'PATCH', headers: { Prefer: 'return=minimal' },
-        body: JSON.stringify({ status: 'concluida', nota_equipe: nota, divergencia: div, divergencia_nota: div ? divNota : '' })
+        body: JSON.stringify({ status: 'devolvida', nota_equipe: nota, divergencia: div, divergencia_nota: div ? divNota : '' })
       });
-      setStatus('Troca concluída.', 'success');
-      return portalRecarregar();
-    }
-    if (act === 'devolver-um' || act === 'devolver') {
-      const ids = act === 'devolver-um' ? [id]
-        : [...el('al-portal-modal-body').querySelectorAll('.al-pcheck:checked')].map((x) => x.dataset.id);
-      if (!ids.length) return;
-      if (!(await uiDialog({ title: `Devolver ${ids.length} troca${ids.length === 1 ? '' : 's'}?`, body: 'A cliente passa a ver como devolvida no portal.', confirmLabel: 'Devolver' }))) return;
-      await sbFetch(`/rest/v1/portal_itens?id=in.(${ids.join(',')})`, {
-        method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ status: 'devolvida' })
-      });
-      setStatus(`${ids.length} troca${ids.length === 1 ? '' : 's'} devolvida${ids.length === 1 ? '' : 's'}.`, 'success');
+      setStatus('Troca finalizada.', 'success');
       return portalRecarregar();
     }
   } catch (e) {
@@ -1317,11 +1304,6 @@ function wirePortalEvents() {
     if (b) handlePortalAction(b.dataset.portalAct, b);
   });
   body.addEventListener('change', (e) => {
-    if (e.target.classList.contains('al-pcheck')) {
-      const algum = body.querySelector('.al-pcheck:checked');
-      const dev = el('al-portal-devolver');
-      if (dev) dev.disabled = !algum;
-    }
     if (e.target.id === 'al-portal-div') {
       el('al-portal-div-box').hidden = !e.target.checked;
       e.target.closest('.al-check')?.classList.toggle('is-checked', e.target.checked);

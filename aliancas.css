@@ -914,7 +914,7 @@ details.al-psec > summary { cursor: pointer; list-style: revert; }
 .al-plist { display: flex; flex-direction: column; }
 .al-prow {
   display: grid;
-  grid-template-columns: auto 108px minmax(0, 1fr) auto auto;
+  grid-template-columns: 108px minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
   padding: 10px 0;
@@ -1013,6 +1013,6 @@ details.al-psec > summary { cursor: pointer; list-style: revert; }
 .al-ptl__q { font-weight: 600; }
 @media (max-width: 760px) {
   .al-pgrid { grid-template-columns: minmax(0, 1fr); }
-  .al-prow { grid-template-columns: auto minmax(0, 1fr) auto; }
-  .al-prow .al-mono { grid-column: 2 / -1; }
+  .al-prow { grid-template-columns: minmax(0, 1fr) auto; }
+  .al-prow .al-mono { grid-column: 1 / -1; }
 }

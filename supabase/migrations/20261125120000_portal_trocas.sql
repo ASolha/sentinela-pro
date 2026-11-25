@@ -674,7 +674,7 @@ begin
   end if;
 
   v_titulo := left(v_item.codigo || case when v_item.referencia <> '' then ' · ' || v_item.referencia else '' end, 120);
-  select 'Portal ' || v_item.codigo || ' (v' || v_item.versao || ') · '
+  select 'Portal ' || v_item.codigo || ' · '
          || case v_item.peca when 'par' then 'Par' else 'Avulsa' end
          || coalesce(' · ' || string_agg(
               initcap(a ->> 'identificacao')
