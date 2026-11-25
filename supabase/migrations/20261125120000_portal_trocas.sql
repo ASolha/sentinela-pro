@@ -456,7 +456,7 @@ begin
       when v_det ? 'status' then 'status:' || (v_novo ->> 'status')
       when v_det ? 'versao' then 'versao:' || (v_novo ->> 'versao')
       when v_det ? 'impressa_versao' then 'impressa:' || (v_novo ->> 'impressa_versao')
-      when v_det ? 'recebido_em' then 'pacote_recebido'
+      when v_det ? 'recebido_em' then 'recebido'
       else 'alterada'
     end;
   end if;

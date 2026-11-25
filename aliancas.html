@@ -24,6 +24,7 @@
     <nav class="al-tabs" role="tablist">
       <button class="al-tab is-active" data-view="ativos" type="button">Casos da semana <span id="al-tab-count" class="al-count">0</span></button>
       <button class="al-tab" data-view="historico" type="button">Histórico</button>
+      <button class="al-tab" data-view="portal" type="button" id="al-tab-portal"><span id="al-tab-portal-label">Portal</span> <span id="al-portal-count" class="al-count" hidden>0</span></button>
     </nav>
     <div class="al-toolbar">
       <button id="al-btn-novo" class="al-btn al-btn--primary" type="button">+ Adicionar caso</button>
@@ -49,6 +50,15 @@
     <!-- Histórico -->
     <main id="al-view-historico" class="al-view" hidden>
       <div id="al-historico" class="al-historico"></div>
+    </main>
+
+    <!-- Portal de trocas (cliente externa) -->
+    <main id="al-view-portal" class="al-view" hidden>
+      <form id="al-portal-busca" class="al-portal-busca" autocomplete="off">
+        <input type="text" id="al-portal-q" class="al-input" placeholder="Código da troca ou do pacote (TR-0042-03) — ou leia o QR do canhoto" aria-label="Buscar troca ou pacote pelo código" />
+        <button type="submit" class="al-btn">Buscar</button>
+      </form>
+      <div id="al-portal-body"></div>
     </main>
   </div>
 
@@ -154,6 +164,18 @@
           <button type="submit" id="al-regra-submit" class="al-btn al-btn--primary">Adicionar regra</button>
         </div>
       </form>
+    </div>
+  </div>
+
+  <!-- Modal: pacote / troca do portal -->
+  <div id="al-modal-portal" class="al-modal" hidden>
+    <div class="al-modal__backdrop" data-close="1"></div>
+    <div class="al-modal__box al-modal__box--wide">
+      <div class="al-modal__head">
+        <h2 id="al-portal-modal-title">Pacote</h2>
+        <button class="al-modal__close" data-close="1" type="button">✕</button>
+      </div>
+      <div id="al-portal-modal-body" class="al-pmodal"></div>
     </div>
   </div>
 

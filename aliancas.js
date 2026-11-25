@@ -365,7 +365,7 @@ function cardHTML(c) {
         <div class="al-card__title ${c.titulo ? '' : 'is-empty'}">${c.titulo ? esc(c.titulo) : 'Sem título'}</div>
         <span class="al-card__qtd">${qtdText(c)}</span>
       </div>
-      <div class="al-chips">${chipsHTML(c.seletores)}</div>
+      <div class="al-chips">${portalChipCaso(c.id)}${chipsHTML(c.seletores)}</div>
       ${c.observacao ? `<div class="al-card__obs">${esc(c.observacao)}</div>` : ''}
       <div class="al-card__foot">
         <span class="al-card__meta">${esc(c.created_by_name || '—')} · ${fmtDate(c.created_at)}</span>
@@ -375,6 +375,12 @@ function cardHTML(c) {
       </div>
     </article>
   `;
+}
+
+// Card criado a partir de uma troca do portal: chip com o código, abre a troca.
+function portalChipCaso(casoId) {
+  const i = portal.itens.find((x) => x.caso_id === casoId);
+  return i ? `<button type="button" class="al-chip al-chip--portal" data-portal-item="${i.id}" title="Abrir a troca do portal">${esc(i.codigo)}</button>` : '';
 }
 
 function renderCasos() {
@@ -735,6 +741,8 @@ function closeModals() {
   el('al-modal-resumo').hidden = true;
   el('al-modal-seletores').hidden = true;
   el('al-modal-regras').hidden = true;
+  el('al-modal-portal').hidden = true;
+  portalModal = null;
 }
 
 /* ── Regras do resumo (admin) ──────────────────────────────────────────── */
@@ -848,14 +856,485 @@ async function submitRegra(e) {
   }
 }
 
+/* ── Portal de trocas (cliente externa, medievaljoias.com.br/pedidos) ──── */
+// A cliente cadastra as trocas no portal; aqui a equipe confere, conclui e devolve.
+// Quem fez cada ação fica em portal_eventos (só a equipe lê); no papel não sai nome.
+const PORTAL_TIPOS = {
+  troca_aro: 'Troca de aro',
+  troca_modelo: 'Troca de modelo',
+  defeito: 'Defeito',
+  nova_gravacao: 'Nova gravação',
+  regravacao: 'Regravação'
+};
+const PORTAL_ORDEM = Object.keys(PORTAL_TIPOS);
+// Seletores sugeridos ao conferir. Só marca os que existem e estão ativos. Ajuste aqui.
+const PORTAL_MAPA_SELETORES = {
+  troca_aro: ['Troca', 'Aro'],
+  troca_modelo: ['Troca'],
+  defeito: ['Defeito'],
+  nova_gravacao: ['Nova gravação'],
+  regravacao: ['Regravação']
+};
+const PORTAL_SEM_DEFEITO = 'Sem defeito'; // troca de aro/modelo sem "Defeito" marcado
+const PORTAL_STATUS = {
+  rascunho: { t: 'Rascunho', k: 'done' },
+  enviada: { t: 'A conferir', k: 'info' },
+  recebida: { t: 'Recebida', k: 'warn' },
+  concluida: { t: 'Concluída', k: 'ok' },
+  devolvida: { t: 'Devolvida', k: 'done' },
+  cancelada: { t: 'Cancelada', k: 'done' }
+};
+const PORTAL_CODIGO_RE = /TR-\d{4,}(?:-\d{2,})?/i;
+
+let portal = { disponivel: false, erro: '', clientes: [], lotes: [], itens: [] };
+let portalModal = null; // { tipo: 'lote'|'item', id }
+
+async function loadPortal() {
+  try {
+    const [lotes, clientes] = await Promise.all([
+      sbFetch('/rest/v1/portal_lotes?status=in.(enviado,devolvido)&order=fechado_em.desc&limit=80&select=*'),
+      sbFetch('/rest/v1/portal_clientes?select=id,nome,ativo')
+    ]);
+    const ids = (lotes || []).map((l) => l.id);
+    const itens = ids.length
+      ? await sbFetch(`/rest/v1/portal_itens?lote_id=in.(${ids.join(',')})&order=seq.asc&select=*`)
+      : [];
+    portal = { disponivel: true, erro: '', clientes: clientes || [], lotes: lotes || [], itens: itens || [] };
+  } catch (e) {
+    portal = { disponivel: false, erro: e.message, clientes: [], lotes: [], itens: [] };
+  }
+}
+
+const portalCliente = (id) => portal.clientes.find((c) => c.id === id)?.nome || 'Cliente';
+const portalItensDo = (loteId) => portal.itens.filter((i) => i.lote_id === loteId);
+const portalLote = (id) => portal.lotes.find((l) => l.id === id);
+const portalItem = (id) => portal.itens.find((i) => i.id === id);
+const portalOrdenarTipos = (tipos) => [...(tipos || [])].sort((a, b) => PORTAL_ORDEM.indexOf(a) - PORTAL_ORDEM.indexOf(b));
+const portalAliancas = (itens) => itens.reduce((s, i) => s + Math.max(1, (i.aneis || []).length), 0);
+function portalPill(status) {
+  const s = PORTAL_STATUS[status] || { t: status, k: 'done' };
+  return `<span class="al-pill al-pill--${s.k}">${esc(s.t)}</span>`;
+}
+function portalVersaoAviso(i) {
+  if (i.impressa_versao == null) return '<span class="al-pill al-pill--warn">Canhoto não impresso</span>';
+  if (i.impressa_versao !== i.versao) return `<span class="al-pill al-pill--warn">v${i.versao} não impressa · papel pode estar na v${i.impressa_versao}</span>`;
+  return '';
+}
+function portalPluralStatus(st, n) {
+  const t = (PORTAL_STATUS[st]?.t || st).toLowerCase();
+  return `${n} ${n > 1 && !t.startsWith('a ') ? t + 's' : t}`;
+}
+
+function portalAtualizarAba() {
+  const nome = portal.clientes.length === 1 ? portal.clientes[0].nome : '';
+  el('al-tab-portal-label').textContent = nome ? `Portal · ${nome}` : 'Portal';
+  const pend = portal.itens.filter((i) => i.status === 'enviada').length;
+  const c = el('al-portal-count');
+  c.textContent = String(pend);
+  c.hidden = !pend;
+}
+
+function portalBarra(itens) {
+  const ordem = ['devolvida', 'concluida', 'recebida', 'enviada'];
+  const n = itens.length || 1;
+  const cont = {};
+  itens.forEach((i) => { cont[i.status] = (cont[i.status] || 0) + 1; });
+  const bar = ordem.filter((s) => cont[s]).map((s) => `<span class="al-pbar__s al-pbar__s--${PORTAL_STATUS[s].k}" style="width:${(cont[s] / n) * 100}%"></span>`).join('');
+  const leg = ordem.filter((s) => cont[s]).map((s) => portalPluralStatus(s, cont[s])).join(' · ');
+  return `<div class="al-pbar" aria-hidden="true">${bar}</div><div class="al-card__meta">${esc(leg)}</div>`;
+}
+
+function portalLoteCard(l) {
+  const itens = portalItensDo(l.id);
+  const recebido = l.recebido_em
+    ? `<span class="al-badge">Chegou ${fmtDate(l.recebido_em)}</span>`
+    : (l.status === 'enviado' ? '<span class="al-pill al-pill--info">A caminho</span>' : '');
+  return `
+    <article class="al-card al-plote">
+      <div class="al-card__top">
+        <span class="al-mono al-plote__cod">${esc(l.codigo)}</span>
+        <span class="al-grow"></span>${recebido}
+      </div>
+      <div class="al-card__meta">${esc(portalCliente(l.cliente_id))} · fechado ${fmtDate(l.fechado_em)} · ${itens.length} troca${itens.length === 1 ? '' : 's'} · ${portalAliancas(itens)} aliança${portalAliancas(itens) === 1 ? '' : 's'}</div>
+      ${portalBarra(itens)}
+      <div class="al-card__foot"><span class="al-grow"></span><button class="al-btn al-btn--sm" data-portal-act="abrir-lote" data-id="${l.id}">Abrir pacote</button></div>
+    </article>`;
+}
+
+function renderPortal() {
+  portalAtualizarAba();
+  const wrap = el('al-portal-body');
+  if (!wrap) return;
+  if (!portal.disponivel) {
+    wrap.innerHTML = `<div class="al-empty"><p>O portal de trocas ainda não está ativo neste Supabase.</p>
+      <p class="al-hint">Rode a migration <code>supabase/migrations/20261125120000_portal_trocas.sql</code> no SQL Editor. (${esc(portal.erro)})</p></div>`;
+    return;
+  }
+  const ativos = portal.lotes.filter((l) => l.status === 'enviado');
+  const devolvidos = portal.lotes.filter((l) => l.status === 'devolvido');
+  wrap.innerHTML = `
+    <section class="al-psec">
+      <h3 class="al-psec__t">Pacotes em andamento <span class="al-count">${ativos.length}</span></h3>
+      ${ativos.length ? `<div class="al-cards">${ativos.map(portalLoteCard).join('')}</div>`
+        : '<div class="al-empty"><p>Nenhum pacote em andamento. Quando a cliente fechar um pacote, ele aparece aqui.</p></div>'}
+    </section>
+    ${devolvidos.length ? `<details class="al-psec al-psec--dev"><summary class="al-psec__t">Devolvidos <span class="al-count">${devolvidos.length}</span></summary>
+      <div class="al-cards">${devolvidos.map(portalLoteCard).join('')}</div></details>` : ''}`;
+}
+
+/* Modal do pacote */
+function portalAbrirLote(id) {
+  const l = portalLote(id);
+  if (!l) return;
+  portalModal = { tipo: 'lote', id };
+  const itens = portalItensDo(id);
+  el('al-portal-modal-title').textContent = `Pacote ${l.codigo}`;
+  el('al-portal-modal-body').innerHTML = `
+    <div class="al-pmeta">
+      <span>${esc(portalCliente(l.cliente_id))}</span>
+      <span>Fechado ${fmtDate(l.fechado_em)}</span>
+      <span>${l.recebido_em ? `Chegou ${fmtDate(l.recebido_em)}` : 'Ainda não chegou'}</span>
+      <span>${itens.length} troca${itens.length === 1 ? '' : 's'} · ${portalAliancas(itens)} alianças</span>
+    </div>
+    ${portalBarra(itens)}
+    <div class="al-pacoes">
+      ${!l.recebido_em && l.status === 'enviado' ? `<button class="al-btn al-btn--primary" data-portal-act="lote-recebido" data-id="${l.id}">Marcar pacote como recebido</button>` : ''}
+      <button class="al-btn" data-portal-act="devolver" data-id="${l.id}" id="al-portal-devolver" disabled>Devolver marcadas</button>
+      <span class="al-hint">Marque as trocas concluídas que voltam para a cliente.</span>
+    </div>
+    <div class="al-plist">
+      ${itens.map((i) => `
+        <div class="al-prow">
+          <input type="checkbox" class="al-pcheck" data-id="${i.id}" ${i.status === 'concluida' ? '' : 'disabled'} aria-label="Devolver ${esc(i.codigo)}" />
+          <span class="al-mono">${esc(i.codigo)}</span>
+          <span class="al-prow__main">
+            <span class="al-prow__ref">${esc(i.referencia || 'Sem referência')}</span>
+            <span class="al-card__meta">${i.peca === 'par' ? 'Par' : 'Avulsa'} · ${portalOrdenarTipos(i.tipos).map((k) => PORTAL_TIPOS[k]).join(', ')} · v${i.versao}</span>
+          </span>
+          <span class="al-prow__pills">${portalPill(i.status)}${i.status === 'enviada' ? portalVersaoAviso(i) : ''}</span>
+          <button class="al-btn al-btn--sm" data-portal-act="abrir-item" data-id="${i.id}">${i.status === 'enviada' ? 'Conferir' : 'Abrir'}</button>
+        </div>`).join('')}
+    </div>`;
+  el('al-modal-portal').hidden = false;
+}
+
+/* Modal da troca: conferir / concluir / devolver */
+function portalTextoGravacao(g) {
+  const txt = g.texto || '';
+  if (!txt) return '<span class="al-hint">(desenho do anexo)</span>';
+  return `<span class="al-pgrav">${esc(txt).split('\n').join('<span class="al-pret" title="quebra de linha">↵</span>\n')}</span>`;
+}
+function portalAneisHTML(i) {
+  const temGrav = (i.tipos || []).some((k) => k === 'nova_gravacao' || k === 'regravacao');
+  return `<table class="al-ptab"><thead><tr><th>Aliança</th><th>Aro</th><th>Gravação</th></tr></thead><tbody>${(i.aneis || []).map((a, ai) => {
+    const nome = a.identificacao === 'masculina' ? 'Masculina' : 'Feminina';
+    const trocaAro = (i.tipos || []).includes('troca_aro');
+    const aro = a.aro_atual == null ? '?' : (trocaAro && a.aro_novo != null
+      ? (a.aro_novo === a.aro_atual ? `${a.aro_atual} (mantém)` : `<b>${a.aro_atual} → ${a.aro_novo}</b>`)
+      : `${a.aro_atual}`);
+    const gravs = temGrav && (a.gravacoes || []).length
+      ? a.gravacoes.map((g, gi) => `
+          <div class="al-pgv">
+            <div class="al-pgv__top"><span class="al-badge">${g.local === 'externa' ? 'Externa' : 'Interna'}</span>
+              ${g.texto ? `<button class="al-link" data-portal-act="copiar" data-a="${ai}" data-g="${gi}">Copiar texto</button>` : ''}</div>
+            ${portalTextoGravacao(g)}
+            <div class="al-card__meta">Fonte: <b class="${(g.fonte || 'Arial') !== 'Arial' ? 'al-pdest' : ''}">${esc(g.texto ? (g.fonte || 'Arial') : '—')}</b></div>
+            ${(g.anexos || []).length ? `<div class="al-panexos">${g.anexos.map((x) => `
+              <a class="al-panexo" data-path="${esc(x.path)}" href="#" title="Baixar ${esc(x.nome)}">
+                <span class="al-panexo__th" data-thumb="${esc(x.path)}" data-tipo="${esc(x.tipo || '')}">${String(x.tipo || '').startsWith('image/') ? '' : 'PDF'}</span>
+                <span class="al-panexo__nm">${esc(x.nome)}</span>
+              </a>`).join('')}</div>` : ''}
+          </div>`).join('')
+      : '<span class="al-hint">sem gravação</span>';
+    return `<tr><td><b>${nome}</b>${a.pedra ? '<br><span class="al-pill al-pill--warn">com pedra</span>' : ''}</td><td>${aro}</td><td>${gravs}</td></tr>`;
+  }).join('')}</tbody></table>`;
+}
+function portalSeletoresSugeridos(i) {
+  if (i.seletores_confirmados && i.seletores_confirmados.length) return new Set(i.seletores_confirmados.map(normLabel));
+  const sug = new Set();
+  (i.tipos || []).forEach((k) => (PORTAL_MAPA_SELETORES[k] || []).forEach((l) => sug.add(normLabel(l))));
+  const troca = (i.tipos || []).some((k) => k === 'troca_aro' || k === 'troca_modelo');
+  if (troca && !(i.tipos || []).includes('defeito')) sug.add(normLabel(PORTAL_SEM_DEFEITO));
+  return sug;
+}
+function portalEventoTxt(ev) {
+  const [acao, valor] = String(ev.acao || '').split(':');
+  const status = { enviada: 'Fechou o pacote (troca enviada)', recebida: 'Conferiu e recebeu', concluida: 'Concluiu', devolvida: 'Devolveu', cancelada: 'Cancelou' };
+  if (acao === 'criada') return 'Cadastrou a troca';
+  if (acao === 'excluida') return 'Excluiu a troca';
+  if (acao === 'versao') return `Alterou a troca depois de imprimir (virou v${valor})`;
+  if (acao === 'impressa') return `Imprimiu o canhoto v${valor}`;
+  if (acao === 'status') return status[valor] || `Status: ${valor}`;
+  if (acao === 'alterada') return ev.da_cliente ? 'Alterou a troca' : 'Atualizou a conferência';
+  return acao;
+}
+
+async function portalAbrirItem(id) {
+  const i = portalItem(id) || (await portalBuscarItem({ id }));
+  if (!i) return;
+  const l = portalLote(i.lote_id);
+  portalModal = { tipo: 'item', id: i.id };
+  el('al-portal-modal-title').textContent = `Troca ${i.codigo}`;
+  const body = el('al-portal-modal-body');
+  const ativos = seletores.filter((s) => s.is_active);
+  const sug = portalSeletoresSugeridos(i);
+  const qtd = Math.max(1, (i.aneis || []).length);
+  const voltar = l ? `<button class="al-link" data-portal-act="abrir-lote" data-id="${l.id}">← Pacote ${esc(l.codigo)}</button>` : '';
+
+  let acao = '';
+  if (i.status === 'enviada' || i.status === 'recebida') {
+    acao += `
+      <section class="al-pbox">
+        <h4>${i.status === 'enviada' ? 'Conferir e receber' : 'Card nos Casos da semana'}</h4>
+        <div class="al-field"><span>Tipo (seletores do card)</span>
+          <div class="al-checks" id="al-portal-sel">${ativos.map((s) => {
+            const on = sug.has(normLabel(s.label));
+            return `<label class="al-check ${on ? 'is-checked' : ''}"><input type="checkbox" value="${esc(s.label)}" ${on ? 'checked' : ''}/>${esc(s.label)}</label>`;
+          }).join('') || '<span class="al-hint">Nenhum seletor cadastrado.</span>'}</div></div>
+        <label class="al-field al-field--qtd"><span>Quantidade de alianças</span><input type="number" id="al-portal-qtd" min="1" step="1" value="${qtd}" /></label>
+        <button class="al-btn al-btn--primary" data-portal-act="receber" data-id="${i.id}">${i.status === 'enviada' ? 'Confirmar recebimento' : 'Atualizar card'}</button>
+        ${i.status === 'enviada' ? '<span class="al-hint">Cria o card nos Casos da semana com estes seletores.</span>' : ''}
+      </section>`;
+  }
+  if (i.status === 'recebida') {
+    acao += `
+      <section class="al-pbox">
+        <h4>Concluir</h4>
+        <label class="al-field"><span>O que foi feito <em>(a cliente vê no portal)</em></span>
+          <textarea id="al-portal-nota" rows="3" placeholder="Ex.: Feminina ajustada para 17, masculina mantida.">${esc(i.nota_equipe || '')}</textarea></label>
+        <label class="al-check ${i.divergencia ? 'is-checked' : ''}" style="align-self:flex-start"><input type="checkbox" id="al-portal-div" ${i.divergencia ? 'checked' : ''}/>Diferente do que a cliente descreveu</label>
+        <label class="al-field" id="al-portal-div-box" ${i.divergencia ? '' : 'hidden'}><span>O que estava diferente <em>(a cliente vê)</em></span>
+          <textarea id="al-portal-div-nota" rows="2">${esc(i.divergencia_nota || '')}</textarea></label>
+        <button class="al-btn al-btn--primary" data-portal-act="concluir" data-id="${i.id}">Concluir troca</button>
+      </section>`;
+  }
+  if (i.status === 'concluida' || i.status === 'devolvida') {
+    acao += `
+      <section class="al-pbox">
+        <h4>${i.status === 'concluida' ? 'Concluída' : 'Devolvida'}</h4>
+        ${i.nota_equipe ? `<p class="al-pnota">${esc(i.nota_equipe)}</p>` : '<p class="al-hint">Sem nota.</p>'}
+        ${i.divergencia ? `<p class="al-pnota al-pnota--warn"><b>Diferente do descrito:</b> ${esc(i.divergencia_nota)}</p>` : ''}
+        ${i.status === 'concluida' ? `<button class="al-btn al-btn--primary" data-portal-act="devolver-um" data-id="${i.id}">Devolver para a cliente</button>` : ''}
+      </section>`;
+  }
+
+  body.innerHTML = `
+    ${voltar}
+    <div class="al-pmeta">
+      ${portalPill(i.status)}
+      <span>${esc(i.referencia || 'Sem referência')}</span>
+      <span>${l ? esc(portalCliente(l.cliente_id)) : ''}</span>
+    </div>
+    <div class="al-pversao">
+      <div><b>Versão atual: v${i.versao}</b> · salva em ${fmtDate(i.versao_em)} ${portalVersaoAviso(i)}</div>
+      <div class="al-hint">Confira o rodapé do canhoto: ele deve dizer “Versão ${i.versao}”. Versão menor = papel desatualizado; a troca vale como está aqui.</div>
+    </div>
+    <div class="al-pgrid">
+      <section class="al-pbox">
+        <h4>O que a cliente pediu</h4>
+        <dl class="al-pdl">
+          <dt>Peça</dt><dd>${i.peca === 'par' ? 'Par' : 'Avulsa'}</dd>
+          <dt>Tipo</dt><dd><div class="al-chips">${portalOrdenarTipos(i.tipos).map((k) => `<span class="al-chip">${esc(PORTAL_TIPOS[k])}</span>`).join('')}</div></dd>
+          <dt>Modelo</dt><dd>${esc(i.modelo_atual)}${(i.tipos || []).includes('troca_modelo') && i.modelo_novo ? ` → <b>${esc(i.modelo_novo)}</b>` : ''}</dd>
+          ${(i.tipos || []).includes('defeito') ? `<dt>Defeito</dt><dd>${esc(i.defeito_descricao)}</dd>` : ''}
+          ${i.observacao ? `<dt>Obs.</dt><dd>${esc(i.observacao)}</dd>` : ''}
+        </dl>
+        ${portalAneisHTML(i)}
+      </section>
+      <div class="al-pcol">${acao}
+        <section class="al-pbox">
+          <h4>Histórico</h4>
+          <ol class="al-ptl" id="al-portal-tl"><li class="al-hint">Carregando…</li></ol>
+        </section>
+      </div>
+    </div>`;
+  el('al-modal-portal').hidden = false;
+  portalCarregarMiniaturas(body);
+  portalCarregarHistorico(i);
+}
+
+async function portalCarregarHistorico(i) {
+  const tl = el('al-portal-tl');
+  try {
+    const evs = await sbFetch(`/rest/v1/portal_eventos?item_id=eq.${i.id}&order=criado_em.asc&select=*`);
+    const lote = await sbFetch(`/rest/v1/portal_eventos?lote_id=eq.${i.lote_id}&item_id=is.null&acao=eq.pacote_recebido&select=*`).catch(() => []);
+    const lista = [...(evs || []), ...(lote || []).map((e) => ({ ...e, acao: 'pacote' }))]
+      .sort((a, b) => String(a.criado_em).localeCompare(String(b.criado_em)));
+    if (!tl || portalModal?.id !== i.id) return;
+    tl.innerHTML = lista.length ? lista.map((e) => `
+      <li><span class="al-ptl__q">${esc(e.autor_nome || (e.da_cliente ? 'Cliente' : 'Equipe'))}${e.da_cliente ? ' <span class="al-badge">cliente</span>' : ''}</span>
+        <span>${esc(e.acao === 'pacote' ? 'Marcou o pacote como recebido' : portalEventoTxt(e))}</span>
+        <span class="al-card__meta">${fmtDate(e.criado_em)}</span></li>`).join('')
+      : '<li class="al-hint">Sem registros.</li>';
+  } catch (e) {
+    if (tl) tl.innerHTML = `<li class="al-hint">Não deu para carregar: ${esc(e.message)}</li>`;
+  }
+}
+
+async function portalLinkAnexo(path) {
+  const r = await sbFetch(`/storage/v1/object/sign/portal-anexos/${path.split('/').map(encodeURIComponent).join('/')}`, {
+    method: 'POST',
+    body: JSON.stringify({ expiresIn: 3600 })
+  });
+  const u = r?.signedURL || r?.signedUrl;
+  if (!u) throw new Error('Link do anexo indisponível.');
+  return `${CFG.supabaseUrl}/storage/v1${u.startsWith('/') ? '' : '/'}${u}`;
+}
+function portalCarregarMiniaturas(root) {
+  root.querySelectorAll('[data-thumb]').forEach(async (th) => {
+    if (!String(th.dataset.tipo).startsWith('image/')) return;
+    try {
+      const url = await portalLinkAnexo(th.dataset.thumb);
+      th.style.backgroundImage = `url("${url}")`;
+    } catch (_) { th.textContent = '?'; }
+  });
+}
+
+async function portalBuscarItem(filtro) {
+  const q = filtro.id ? `id=eq.${filtro.id}` : `codigo=eq.${encodeURIComponent(filtro.codigo)}`;
+  const rows = await sbFetch(`/rest/v1/portal_itens?${q}&select=*`);
+  const i = rows?.[0];
+  if (i && !portalItem(i.id)) portal.itens.push(i);
+  return i || null;
+}
+
+async function portalBuscar(texto) {
+  const m = String(texto || '').toUpperCase().match(PORTAL_CODIGO_RE);
+  if (!m) { uiAlert('Código não reconhecido', 'Digite um código como TR-0042 ou TR-0042-03, ou leia o QR do canhoto.'); return; }
+  const cod = m[0];
+  if (/-\d{4,}-\d{2,}$/.test(cod)) {
+    const i = portal.itens.find((x) => x.codigo === cod) || (await portalBuscarItem({ codigo: cod }).catch(() => null));
+    if (i) { portalAbrirItem(i.id); return; }
+    uiAlert('Troca não encontrada', `Nenhuma troca com o código ${cod}. Ela ainda pode estar no pacote aberto da cliente.`);
+    return;
+  }
+  const l = portal.lotes.find((x) => x.codigo === cod);
+  if (l) { portalAbrirLote(l.id); return; }
+  uiAlert('Pacote não encontrado', `Nenhum pacote enviado com o código ${cod}.`);
+}
+
+async function portalRecarregar(reabrir = true) {
+  await Promise.all([loadPortal(), loadCasos()]);
+  renderCasos();
+  renderPortal();
+  if (reabrir && portalModal && !el('al-modal-portal').hidden) {
+    if (portalModal.tipo === 'lote') portalAbrirLote(portalModal.id);
+    else portalAbrirItem(portalModal.id);
+  }
+}
+
+async function handlePortalAction(act, btn) {
+  const id = btn.dataset.id;
+  try {
+    if (act === 'abrir-lote') return portalAbrirLote(id);
+    if (act === 'abrir-item') return portalAbrirItem(id);
+    if (act === 'copiar') {
+      const i = portalItem(portalModal?.id);
+      const g = i?.aneis?.[Number(btn.dataset.a)]?.gravacoes?.[Number(btn.dataset.g)];
+      if (!g) return;
+      try { await navigator.clipboard.writeText(g.texto || ''); btn.textContent = 'Copiado!'; }
+      catch (_) { uiAlert('Copie o texto', g.texto || ''); }
+      setTimeout(() => { btn.textContent = 'Copiar texto'; }, 1500);
+      return;
+    }
+    if (act === 'lote-recebido') {
+      btn.disabled = true;
+      await sbFetch(`/rest/v1/portal_lotes?id=eq.${id}`, {
+        method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ recebido_em: new Date().toISOString() })
+      });
+      setStatus('Pacote marcado como recebido.', 'success');
+      return portalRecarregar();
+    }
+    if (act === 'receber') {
+      const sel = [...el('al-portal-sel').querySelectorAll('input:checked')].map((x) => x.value);
+      if (!sel.length) { uiAlert('Marque ao menos um seletor', 'O card nos Casos da semana precisa de um tipo.'); return; }
+      const qtd = Math.max(1, parseInt(el('al-portal-qtd').value, 10) || 1);
+      btn.disabled = true;
+      await sbFetch('/rest/v1/rpc/portal_receber_item', {
+        method: 'POST', body: JSON.stringify({ p_item: id, p_seletores: sel, p_quantidade: qtd })
+      });
+      setStatus('Troca recebida. O card está nos Casos da semana.', 'success');
+      return portalRecarregar();
+    }
+    if (act === 'concluir') {
+      const nota = el('al-portal-nota').value.trim();
+      const div = el('al-portal-div').checked;
+      const divNota = el('al-portal-div-nota').value.trim();
+      if (!nota) { uiAlert('Escreva o que foi feito', 'A cliente vê essa nota no portal.'); return; }
+      if (div && !divNota) { uiAlert('Explique a diferença', 'Escreva o que estava diferente do que a cliente descreveu.'); return; }
+      btn.disabled = true;
+      await sbFetch(`/rest/v1/portal_itens?id=eq.${id}`, {
+        method: 'PATCH', headers: { Prefer: 'return=minimal' },
+        body: JSON.stringify({ status: 'concluida', nota_equipe: nota, divergencia: div, divergencia_nota: div ? divNota : '' })
+      });
+      setStatus('Troca concluída.', 'success');
+      return portalRecarregar();
+    }
+    if (act === 'devolver-um' || act === 'devolver') {
+      const ids = act === 'devolver-um' ? [id]
+        : [...el('al-portal-modal-body').querySelectorAll('.al-pcheck:checked')].map((x) => x.dataset.id);
+      if (!ids.length) return;
+      if (!(await uiDialog({ title: `Devolver ${ids.length} troca${ids.length === 1 ? '' : 's'}?`, body: 'A cliente passa a ver como devolvida no portal.', confirmLabel: 'Devolver' }))) return;
+      await sbFetch(`/rest/v1/portal_itens?id=in.(${ids.join(',')})`, {
+        method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ status: 'devolvida' })
+      });
+      setStatus(`${ids.length} troca${ids.length === 1 ? '' : 's'} devolvida${ids.length === 1 ? '' : 's'}.`, 'success');
+      return portalRecarregar();
+    }
+  } catch (e) {
+    btn.disabled = false;
+    uiAlert('Não deu certo', e.message);
+  }
+}
+
+function wirePortalEvents() {
+  el('al-portal-busca').addEventListener('submit', (e) => {
+    e.preventDefault();
+    portalBuscar(el('al-portal-q').value);
+    el('al-portal-q').select();
+  });
+  el('al-portal-body').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-portal-act]');
+    if (b) handlePortalAction(b.dataset.portalAct, b);
+  });
+  const body = el('al-portal-modal-body');
+  body.addEventListener('click', async (e) => {
+    const anexo = e.target.closest('.al-panexo');
+    if (anexo) {
+      e.preventDefault();
+      try { window.open(await portalLinkAnexo(anexo.dataset.path), '_blank', 'noopener'); }
+      catch (err) { uiAlert('Não deu para abrir o anexo', err.message); }
+      return;
+    }
+    const b = e.target.closest('[data-portal-act]');
+    if (b) handlePortalAction(b.dataset.portalAct, b);
+  });
+  body.addEventListener('change', (e) => {
+    if (e.target.classList.contains('al-pcheck')) {
+      const algum = body.querySelector('.al-pcheck:checked');
+      const dev = el('al-portal-devolver');
+      if (dev) dev.disabled = !algum;
+    }
+    if (e.target.id === 'al-portal-div') {
+      el('al-portal-div-box').hidden = !e.target.checked;
+      e.target.closest('.al-check')?.classList.toggle('is-checked', e.target.checked);
+    }
+    const chk = e.target.closest('#al-portal-sel .al-check');
+    if (chk) chk.classList.toggle('is-checked', e.target.checked);
+  });
+}
+
 /* ── View switching ────────────────────────────────────────────────────── */
 function switchView(view) {
   currentView = view;
   document.querySelectorAll('.al-tab').forEach((t) => t.classList.toggle('is-active', t.dataset.view === view));
   el('al-view-ativos').hidden = view !== 'ativos';
   el('al-view-historico').hidden = view !== 'historico';
+  el('al-view-portal').hidden = view !== 'portal';
+  document.querySelector('.al-toolbar').hidden = view === 'portal';
   el('al-counters').style.display = view === 'ativos' ? '' : 'none';
   if (view === 'historico') renderHistorico();
+  if (view === 'portal') { renderPortal(); el('al-portal-q').focus(); }
 }
 
 /* ── Eventos ───────────────────────────────────────────────────────────── */
@@ -891,6 +1370,8 @@ function wireEvents() {
 
   // delegação de ações nos cards
   el('al-cards').addEventListener('click', (e) => {
+    const chip = e.target.closest('[data-portal-item]');
+    if (chip) { portalAbrirItem(chip.dataset.portalItem); return; }
     const btn = e.target.closest('[data-act]');
     if (btn) handleCardAction(btn.dataset.act, btn.dataset.id);
   });
@@ -950,16 +1431,19 @@ function wireEvents() {
   // tabs
   document.querySelectorAll('.al-tab').forEach((t) => t.addEventListener('click', () => switchView(t.dataset.view)));
 
+  wirePortalEvents();
+
   // atualiza ao voltar o foco (outro usuário pode ter mexido)
   window.addEventListener('focus', () => {
-    if (currentView === 'ativos') refreshData();
+    if (currentView === 'ativos' || currentView === 'portal') refreshData();
   });
 }
 
 async function refreshData() {
   try {
-    await Promise.all([loadCasos(), loadSeletores(), loadRegras()]);
+    await Promise.all([loadCasos(), loadSeletores(), loadRegras(), loadPortal()]);
     renderCasos();
+    renderPortal();
     if (currentView === 'historico') renderHistorico();
   } catch (e) {
     setStatus('Falha ao atualizar: ' + e.message, 'error');
@@ -1020,7 +1504,12 @@ async function connectRealtime() {
           postgres_changes: [
             { event: '*', schema: 'public', table: 'aliancas_casos' },
             { event: '*', schema: 'public', table: 'aliancas_seletores' },
-            { event: '*', schema: 'public', table: 'aliancas_resumo_regras' }
+            { event: '*', schema: 'public', table: 'aliancas_resumo_regras' },
+            // só com a migration do portal aplicada (senão o canal inteiro falha)
+            ...(portal.disponivel ? [
+              { event: '*', schema: 'public', table: 'portal_lotes' },
+              { event: '*', schema: 'public', table: 'portal_itens' }
+            ] : [])
           ]
         },
         access_token: auth.token
@@ -1082,8 +1571,10 @@ async function init() {
     await loadSeletores();
     await loadRegras();
     await loadCasos();
+    await loadPortal();
     setStatus('');
     renderCasos();
+    renderPortal();
     connectRealtime(); // atualização ao vivo entre os usuários
   } catch (e) {
     setStatus('Erro ao carregar dados: ' + e.message + ' — verifique se a migration foi aplicada no Supabase.', 'error');
